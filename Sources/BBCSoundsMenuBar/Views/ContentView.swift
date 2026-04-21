@@ -40,6 +40,50 @@ struct ContentView: View {
 
             Divider()
 
+            // Resume Prompt
+            if let session = viewModel.resumeSession {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .foregroundColor(.blue)
+                        Text("Resume playback?")
+                            .font(.subheadline.bold())
+                        Spacer()
+                        Button {
+                            viewModel.dismissResume()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    Text(session.programme.name)
+                        .font(.caption)
+                        .lineLimit(1)
+                    
+                    HStack {
+                        let timeStr = formatTime(session.time)
+                        Text("At \(timeStr)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Resume") {
+                            viewModel.resumePlayback()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(10)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
+                .padding(8)
+                
+                Divider()
+            }
+
             // Player (shown when stream active or loading)
             if viewModel.player.currentProgramme != nil || viewModel.isLoadingStream {
                 PlayerControlsView(player: viewModel.player)

@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct BBCSoundsMenuBarApp: App {
-    @StateObject private var viewModel = AppViewModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
 
     init() {
         // Ensure the app behaves as a menubar/accessory app even if launched from CLI
@@ -10,12 +10,8 @@ struct BBCSoundsMenuBarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("BBC Sounds", systemImage: "radio") {
-            ContentView()
-                .environmentObject(viewModel)
-                .frame(width: 420, height: 520)
+        Settings {
+            EmptyView()
         }
-        .menuBarExtraStyle(.window)
     }
-
 }

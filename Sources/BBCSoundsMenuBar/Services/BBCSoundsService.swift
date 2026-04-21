@@ -20,17 +20,7 @@ actor BBCSoundsService {
     private let session = URLSession.shared
     
     private func logToDebugFile(_ msg: String) {
-        print(msg)
-        let logURL = URL(fileURLWithPath: "/tmp/bbc_sounds_debug.log")
-        if let data = "[\(Date())] 📡 [BBCSounds] \(msg)\n".data(using: .utf8) {
-            if let fileHandle = try? FileHandle(forWritingTo: logURL) {
-                fileHandle.seekToEndOfFile()
-                fileHandle.write(data)
-                fileHandle.closeFile()
-            } else {
-                try? data.write(to: logURL)
-            }
-        }
+        print("📡 [BBCSounds] \(msg)")
     }
     
     // MARK: - Public API
@@ -57,15 +47,23 @@ actor BBCSoundsService {
         for module in response.data {
             guard let items = module.data else { continue }
             for item in items {
+                let isLive = item.type == "live_search_result_item"
+                let id = isLive ? (item.now?.service_id ?? item.id) : item.id
+                let name = item.titles?.primary ?? item.now?.station_name ?? "Unknown"
+                let description = item.synopses?.short ?? item.now?.short_synopsis
+                let artworkURL = (item.image_url ?? item.now?.episode_image_url)?
+                    .replacingOccurrences(of: "{recipe}", with: "400x400")
+                
                 programmes.append(Programme(
-                    id: item.id,
+                    id: id,
                     index: 0,
-                    name: item.titles.primary,
-                    channel: item.network?.short_title ?? "BBC",
+                    name: name,
+                    channel: item.network?.short_title ?? item.now?.station_name ?? "BBC",
                     duration: nil,
-                    description: item.synopses?.short,
+                    description: description,
                     firstBroadcast: nil,
-                    artworkURL: item.image_url?.replacingOccurrences(of: "{recipe}", with: "400x400")
+                    artworkURL: artworkURL,
+                    isLive: isLive
                 ))
             }
         }
@@ -94,18 +92,23 @@ actor BBCSoundsService {
             }
             throw error
         }
-        guard let prog = response.programme else { throw BBCSoundsError.noVPIDFound }
+        guard let prog = response.programme ?? response.version?.parent?.programme else { throw BBCSoundsError.noVPIDFound }
         
-        return Programme(
+        let duration = prog.versions?.first?.duration ?? response.version?.duration ?? 0
+        
+        var programme = Programme(
             id: pid,
             index: 0,
             name: prog.title ?? "Unknown Programme",
             channel: prog.ownership?.service?.title ?? "BBC",
-            duration: formatDuration(prog.versions?.first?.duration ?? 0),
+            duration: formatDuration(duration),
             description: prog.short_synopsis,
             firstBroadcast: nil,
-            artworkURL: prog.image?.pid != nil ? "https://ichef.bbci.co.uk/images/ic/400x400/\(prog.image!.pid!).jpg" : nil
+            artworkURL: prog.image?.pid != nil ? "https://ichef.bbci.co.uk/images/ic/400x400/\(prog.image!.pid!).jpg" : nil,
+            isLive: prog.type == "station" || prog.type == "masterbrand"
         )
+        programme.durationInSeconds = duration
+        return programme
     }
     
     func getStreamURL(pid: String) async throws -> URL {
@@ -156,19 +159,100 @@ actor BBCSoundsService {
         throw lastError ?? BBCSoundsError.noStreamFound
     }
     
-    // MARK: - Private Helpers
+    // Returns both the URL and the actual Episode/Version PID resolved
+    func resolveStream(pid: String) async throws -> (URL, String) {
+        let vpid = try await fetchVPID(pid: pid)
+        let url = try await getStreamURL(pid: pid)
+        return (url, vpid)
+    }
     
-    private func fetchVPID(pid: String) async throws -> String {
-        let urlString = "https://www.bbc.co.uk/programmes/\(pid).json"
+    func fetchSegments(pid: String, isLive: Bool) async throws -> [Segment] {
+        let urlString: String
+        if isLive {
+            urlString = "https://rms.api.bbc.co.uk/v2/services/\(pid)/segments/latest?experience=domestic&limit=10"
+        } else {
+            urlString = "https://rms.api.bbc.co.uk/v2/programmes/\(pid)/segments?experience=domestic"
+        }
+        
+        guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
+        
+        do {
+            let data = try await request(url)
+            let response = try JSONDecoder().decode(RMSSegmentResponse.self, from: data)
+            let segments = response.data.compactMap { item -> Segment? in
+                guard item.segment_type == "music" || item.type == "segment_item" else { return nil }
+                return Segment(
+                    id: item.id,
+                    artist: item.titles.primary,
+                    title: item.titles.secondary ?? "Unknown",
+                    startTime: item.offset.start,
+                    label: item.offset.label,
+                    isNowPlaying: item.offset.now_playing ?? false
+                )
+            }
+            
+            if !segments.isEmpty || isLive {
+                return segments
+            }
+        } catch {
+            logToDebugFile("RMS Segments failed for \(pid): \(error.localizedDescription)")
+        }
+        
+        // Fallback for on-demand episodes where RMS is empty
+        if !isLive {
+            logToDebugFile("Attempting fallback segments for \(pid)")
+            return (try? await fetchSegmentsFallback(pid: pid)) ?? []
+        }
+        
+        return []
+    }
+    
+    private func fetchSegmentsFallback(pid: String) async throws -> [Segment] {
+        let urlString = "https://www.bbc.co.uk/programmes/\(pid)/segments.json"
         guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
         
         let data = try await request(url)
+        let response = try JSONDecoder().decode(ProgrammesSegmentResponse.self, from: data)
+        
+        return response.segment_events.compactMap { event in
+            guard let seg = event.segment, (seg.type == "music" || seg.artist != nil) else { return nil }
+            return Segment(
+                id: event.pid,
+                artist: seg.artist ?? "Unknown Artist",
+                title: seg.track_title ?? seg.title ?? "Unknown Track",
+                startTime: event.version_offset,
+                label: nil,
+                isNowPlaying: false
+            )
+        }
+    }
+    
+    // MARK: - Private Helpers
+    
+    private func fetchVPID(pid: String) async throws -> String {
+        // Live station fallback: service IDs like bbc_radio_one are their own VPID
+        if pid.hasPrefix("bbc_") || pid.contains("radio") {
+            logToDebugFile("PID \(pid) looks like a live service, using as VPID.")
+            return pid
+        }
+
+        let urlString = "https://www.bbc.co.uk/programmes/\(pid).json"
+        guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
+        
+        let data: Data
+        do {
+            data = try await request(url)
+        } catch {
+            logToDebugFile("Metadata request failed for \(pid) (\(error.localizedDescription)). Using PID as fallback VPID.")
+            return pid
+        }
+
         let response: ProgrammeMetadataResponse
         do {
             response = try JSONDecoder().decode(ProgrammeMetadataResponse.self, from: data)
         } catch {
-            print("❌ fetchVPID Decoding Error: \(error)")
-            throw error
+            logToDebugFile("Decoding failed for \(pid), using as fallback VPID.")
+            return pid
         }
         
         if let type = response.programme?.type, type == "brand" || type == "series" {
@@ -181,7 +265,8 @@ actor BBCSoundsService {
                     let rmsResponse = try JSONDecoder().decode(RMSPlayableResponse.self, from: latestData)
                     if let playableVpid = rmsResponse.data?.first?.id {
                         logToDebugFile("✅ Found playable VPID: \(playableVpid) for container \(pid)")
-                        return playableVpid
+                        // Recursively resolve the playable item (it might be an episode or a version)
+                        return try await fetchVPID(pid: playableVpid)
                     }
                 } catch {
                     logToDebugFile("Failed to fetch playable info for container: \(error)")
@@ -189,13 +274,18 @@ actor BBCSoundsService {
             }
         }
 
-        
+        if let vpid = response.version?.pid {
+            logToDebugFile("Found VPID in version root: \(vpid)")
+            return vpid
+        }
+
         if let vpid = response.programme?.versions?.first?.pid {
             logToDebugFile("Found VPID in versions: \(vpid)")
             return vpid
         }
-        logToDebugFile("No VPID found in versions array for PID \(pid).")
-        throw BBCSoundsError.noVPIDFound
+
+        logToDebugFile("No explicit VPID found for PID \(pid), falling back to PID itself.")
+        return pid
     }
     
     private func formatDuration(_ seconds: Int) -> String? {
@@ -233,10 +323,20 @@ struct RMSModule: Codable {
 
 struct RMSItem: Codable {
     let id: String
-    let titles: RMSTitles
+    let type: String?
+    let titles: RMSTitles?
     let synopses: RMSSynopses?
     let image_url: String?
     let network: RMSNetwork?
+    let now: RMSNow?
+}
+
+struct RMSNow: Codable {
+    let service_id: String?
+    let station_name: String?
+    let title: String?
+    let short_synopsis: String?
+    let episode_image_url: String?
 }
 
 struct RMSTitles: Codable {
@@ -252,6 +352,17 @@ struct RMSNetwork: Codable {
 }
 
 struct ProgrammeMetadataResponse: Codable {
+    let programme: ProgrammeInfo?
+    let version: ProgrammeVersionInfo?
+}
+
+struct ProgrammeVersionInfo: Codable {
+    let pid: String?
+    let duration: Int?
+    let parent: ProgrammeParent?
+}
+
+struct ProgrammeParent: Codable {
     let programme: ProgrammeInfo?
 }
 
@@ -303,5 +414,50 @@ struct RMSPlayableResponse: Codable {
 
 struct RMSPlayableItem: Codable {
     let id: String?
+}
+
+// MARK: - RMS Segments
+
+struct RMSSegmentResponse: Codable {
+    let data: [RMSSegmentItem]
+}
+
+struct RMSSegmentItem: Codable {
+    let type: String
+    let id: String
+    let segment_type: String?
+    let titles: RMSSegmentTitles
+    let offset: RMSSegmentOffset
+}
+
+struct RMSSegmentTitles: Codable {
+    let primary: String
+    let secondary: String?
+}
+
+struct RMSSegmentOffset: Codable {
+    let start: Int
+    let label: String?
+    let now_playing: Bool?
+}
+
+// MARK: - Older Programmes API Segments
+
+struct ProgrammesSegmentResponse: Codable {
+    let segment_events: [ProgrammesSegmentEvent]
+}
+
+struct ProgrammesSegmentEvent: Codable {
+    let pid: String
+    let version_offset: Int
+    let segment: ProgrammesSegmentData?
+}
+
+struct ProgrammesSegmentData: Codable {
+    let type: String?
+    let artist: String?
+    let track_title: String?
+    let title: String?
+    let duration: Int?
 }
 

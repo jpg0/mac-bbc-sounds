@@ -6,42 +6,65 @@ import AppKit
 @MainActor
 class PlayerService: ObservableObject {
     @Published var isPlaying = false
-    @Published var volume: Float = 0.7
+    @Published var volume: Float {
+        didSet {
+            UserDefaults.standard.set(volume, forKey: "PlayerVolume")
+        }
+    }
     @Published var currentProgramme: Programme? = nil
     @Published var isLoading = false
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
     @Published var playerError: String? = nil
     @Published var currentArtwork: NSImage? = nil
+    @Published var currentTracks: [Segment] = []
+    @Published var activeTrack: Segment? = nil
     
     var proxyConfig: ProxyConfiguration?
+    var bbcSounds: BBCSoundsService?
 
     private var player: AVPlayer?
     private var statusObserver: AnyCancellable?
     private var durationObserver: AnyCancellable?
+    private var resourceLoaderDelegate: BBCProxyResourceLoaderDelegate?
+    private var trackUpdateTask: Task<Void, Never>?
+    private var lastSavedTime: Double = 0
+    private var isUpdatingTracks = false
+    private var currentLoadingArtworkURL: URL?
+
+    init() {
+        self.volume = UserDefaults.standard.value(forKey: "PlayerVolume") as? Float ?? 0.7
+    }
+
     private func logToDebugFile(_ msg: String) {
-        print(msg)
-        let logURL = URL(fileURLWithPath: "/tmp/bbc_sounds_debug.log")
-        if let data = "[\(Date())] 🔊 [PlayerService] \(msg)\n".data(using: .utf8) {
-            if let fileHandle = try? FileHandle(forWritingTo: logURL) {
-                fileHandle.seekToEndOfFile()
-                fileHandle.write(data)
-                fileHandle.closeFile()
-            } else {
-                try? data.write(to: logURL)
-            }
-        }
+        print("🔊 [PlayerService] \(msg)")
     }
 
     func play(url: URL, programme: Programme) {
         stop()
         playerError = nil
         
-        let item = AVPlayerItem(url: url)
+        // Use custom resource loader for caching/proxying
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.scheme = "bbcproxy"
+        guard let proxyURL = components?.url else {
+            logToDebugFile("❌ Could not create proxy URL")
+            return
+        }
         
-        logToDebugFile("Playing URL: \(url.absoluteString)")
+        let asset = AVURLAsset(url: proxyURL)
+        let delegate = BBCProxyResourceLoaderDelegate(proxyConfig: proxyConfig)
+        self.resourceLoaderDelegate = delegate
+        asset.resourceLoader.setDelegate(delegate, queue: delegate.getQueue())
         
+        let item = AVPlayerItem(asset: asset)
+        
+        // Caching Requirements:
+        // For Live: Minimal buffer (AVPlayer handles this naturally for live playlists)
+        // For VOD: Buffer as much as possible (the entire show)
+        item.preferredForwardBufferDuration = 3600 * 3 // Try to buffer up to 3 hours
         player = AVPlayer(playerItem: item)
+        player?.automaticallyWaitsToMinimizeStalling = true
         player?.volume = volume
         player?.play()
         
@@ -49,12 +72,19 @@ class PlayerService: ObservableObject {
         currentProgramme = programme
         isLoading = true // Will be set to false when ready to play
         updateNowPlaying()
+        startTrackUpdates(for: programme)
         
         // Observe time
         player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
             print("🎬 Current Time: \(String(format: "%.1f", time.seconds))s")
             Task { @MainActor in
                 self?.currentTime = time.seconds
+                self?.updateNowPlayingTrack()
+                
+                // Save session every 5 seconds
+                if abs((self?.lastSavedTime ?? 0) - time.seconds) >= 5 {
+                    self?.saveSession()
+                }
             }
         }
         
@@ -78,8 +108,10 @@ class PlayerService: ObservableObject {
             }
         
         NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
-            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
-            self?.logToDebugFile("Playback Failed To Play To End: \(error?.localizedDescription ?? "Unknown")")
+            Task { @MainActor in
+                let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+                self?.logToDebugFile("Playback Failed To Play To End: \(error?.localizedDescription ?? "Unknown")")
+            }
         }
             
         durationObserver = item.publisher(for: \.duration)
@@ -101,6 +133,7 @@ class PlayerService: ObservableObject {
         player?.pause()
         isPlaying = false
         updateNowPlaying()
+        saveSession()
     }
 
     func resume() {
@@ -111,7 +144,8 @@ class PlayerService: ObservableObject {
     
     func seek(to seconds: Double) {
         let time = CMTime(seconds: seconds, preferredTimescale: 1)
-        player?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+        // Use default tolerances to avoid heavy frame-accurate CPU spikes unless needed
+        player?.seek(to: time) { [weak self] finished in
             if finished {
                 Task { @MainActor in
                     self?.updateNowPlaying()
@@ -127,12 +161,15 @@ class PlayerService: ObservableObject {
     }
 
     func stop() {
+        saveSession()
         player?.pause()
         player = nil
         isPlaying = false
-        currentProgramme = nil
-        playerError = nil
         currentArtwork = nil
+        currentTracks = []
+        activeTrack = nil
+        trackUpdateTask?.cancel()
+        trackUpdateTask = nil
         
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         durationObserver = nil
@@ -142,6 +179,74 @@ class PlayerService: ObservableObject {
     func setVolume(_ v: Float) {
         volume = v
         player?.volume = v
+    }
+
+    func skipToTrack(_ segment: Segment) {
+        seek(to: Double(segment.startTime))
+    }
+
+    private func updateNowPlayingTrack() {
+        guard let prog = currentProgramme, !prog.isLive else { return }
+        guard !isUpdatingTracks else { return }
+        isUpdatingTracks = true
+        
+        // Use a local copy to batch updates and avoid triggering @Published for every element
+        var updatedTracks = currentTracks
+        
+        for i in 0..<updatedTracks.count {
+            let start = Double(updatedTracks[i].startTime)
+            let end = (i + 1 < updatedTracks.count) ? Double(updatedTracks[i+1].startTime) : Double(currentProgramme?.durationInSeconds ?? 999999)
+            
+            let isNow = currentTime >= start && currentTime < end
+            if updatedTracks[i].isNowPlaying != isNow {
+                updatedTracks[i].isNowPlaying = isNow
+                if isNow && activeTrack?.id != updatedTracks[i].id {
+                    activeTrack = updatedTracks[i]
+                }
+            }
+        }
+        
+        if updatedTracks != currentTracks {
+            currentTracks = updatedTracks
+        }
+        
+        isUpdatingTracks = false
+    }
+
+    private func startTrackUpdates(for programme: Programme) {
+        trackUpdateTask?.cancel()
+        
+        let pidToUse = programme.resolvedPID ?? programme.id
+        
+        trackUpdateTask = Task {
+            // Give it a moment to stabilize if needed, or just fetch immediately
+            while !Task.isCancelled {
+                do {
+                    if let sounds = self.bbcSounds {
+                        let tracks = try await sounds.fetchSegments(pid: pidToUse, isLive: programme.isLive)
+                        await MainActor.run {
+                            self.currentTracks = tracks
+                            if programme.isLive, let current = tracks.first(where: { $0.isNowPlaying }) {
+                                if self.activeTrack?.id != current.id {
+                                    self.activeTrack = current
+                                }
+                            }
+                            self.updateNowPlayingTrack()
+                        }
+                    }
+                } catch {
+                    logToDebugFile("⚠️ Track update failed for \(pidToUse): \(error.localizedDescription)")
+                }
+                
+                if programme.isLive {
+                    // Poll live every 30 seconds
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                } else {
+                    // For on-demand, one fetch is usually enough
+                    break
+                }
+            }
+        }
     }
 
     @objc private func didFinish() {
@@ -226,13 +331,25 @@ class PlayerService: ObservableObject {
         
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         
-        // Fetch artwork if not already loaded
+        // Fetch artwork if not already loaded and not already loading
         if currentArtwork == nil, let urlString = programme.artworkURL, let url = URL(string: urlString) {
+            guard currentLoadingArtworkURL != url else { return }
+            currentLoadingArtworkURL = url
+            
             Task {
-                if let rawImage = try? await downloadImage(url: url) {
-                    let squareImage = cropToSquare(image: rawImage)
-                    self.currentArtwork = squareImage
-                    self.updateNowPlaying()
+                do {
+                    if let rawImage = try await downloadImage(url: url) {
+                        let squareImage = cropToSquare(image: rawImage)
+                        await MainActor.run {
+                            self.currentArtwork = squareImage
+                            self.currentLoadingArtworkURL = nil
+                            self.updateNowPlaying()
+                        }
+                    } else {
+                        await MainActor.run { self.currentLoadingArtworkURL = nil }
+                    }
+                } catch {
+                    await MainActor.run { self.currentLoadingArtworkURL = nil }
                 }
             }
         }
@@ -278,6 +395,26 @@ class PlayerService: ObservableObject {
                     print("🎬 [AVPlayer AccessLog] Stalls: \(event.numberOfStalls), Dropped Frames: \(event.numberOfDroppedVideoFrames)")
                 }
             }
+        }
+    }
+
+    private func saveSession() {
+        guard let programme = currentProgramme, !programme.isLive else { return }
+        let session = PlaybackSession(programme: programme, time: currentTime, date: Date())
+        if let data = try? JSONEncoder().encode(session) {
+            UserDefaults.standard.set(data, forKey: "LastPlaybackSession")
+            lastSavedTime = currentTime
+            logToDebugFile("💾 Session saved: \(programme.name) at \(Int(currentTime))s")
+        }
+    }
+
+    func openInSpotify(track: Segment) {
+        let query = "artist:\(track.artist) track:\(track.title)"
+        guard let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+        
+        // Open search results in Spotify
+        if let url = URL(string: "https://open.spotify.com/search/\(encodedQuery)") {
+            NSWorkspace.shared.open(url)
         }
     }
 }

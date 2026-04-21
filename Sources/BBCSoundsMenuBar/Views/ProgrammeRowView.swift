@@ -41,10 +41,18 @@ struct ProgrammeRowView: View {
                 .frame(width: 48, height: 48)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(programme.name)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.primary)
-                        .lineLimit(2)
+                    HStack(alignment: .center, spacing: 4) {
+                        Text(programme.name)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.primary)
+                            .lineLimit(2)
+                        
+                        if programme.isLive {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.red)
+                        }
+                    }
 
                     HStack(spacing: 4) {
                         Text(programme.channel)

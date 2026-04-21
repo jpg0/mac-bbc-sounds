@@ -2,12 +2,14 @@ import Foundation
 import AVFoundation
 
 class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, URLSessionTaskDelegate, URLSessionDataDelegate {
-    private let proxyConfig: ProxyConfiguration
+    private let proxyConfig: ProxyConfiguration?
+    private let cacheManager = MediaCacheManager.shared
     private var _session: URLSession?
     private let processingQueue = DispatchQueue(label: "com.bbc-sounds.proxy-loader", qos: .userInitiated)
+    private var prefetchingURLs = Set<URL>()
     var onProxyError: ((String) -> Void)?
     
-    init(proxyConfig: ProxyConfiguration) {
+    init(proxyConfig: ProxyConfiguration?) {
         self.proxyConfig = proxyConfig
         super.init()
     }
@@ -15,15 +17,15 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
     private func getSession() -> URLSession {
         if let s = _session { return s }
         let config = URLSessionConfiguration.default
-        // Using explicit string keys for proxy configuration as discovered in verification tests.
-        // This configuration forces a CONNECT tunnel through the proxy even for HTTPS destinations.
-        config.connectionProxyDictionary = [
-            "HTTPEnable": 1,
-            "HTTPProxy": proxyConfig.host,
-            "HTTPPort": proxyConfig.port,
-            "HTTPProxyUsername": proxyConfig.user,
-            "HTTPProxyPassword": proxyConfig.pass
-        ]
+        if let proxy = proxyConfig {
+            config.connectionProxyDictionary = [
+                "HTTPEnable": 1,
+                "HTTPProxy": proxy.host,
+                "HTTPPort": proxy.port,
+                "HTTPProxyUsername": proxy.user,
+                "HTTPProxyPassword": proxy.pass
+            ]
+        }
         
         let operationQueue = OperationQueue()
         operationQueue.name = "com.bbc-sounds.proxy-session-queue"
@@ -39,18 +41,7 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
     }
     
     private func logToFile(_ message: String) {
-        let logMessage = "[\(Date())] \(message)\n"
-        print(message)
-        if let data = logMessage.data(using: .utf8) {
-            let logURL = URL(fileURLWithPath: "/tmp/bbc_sounds_debug.log")
-            if let fileHandle = try? FileHandle(forWritingTo: logURL) {
-                fileHandle.seekToEndOfFile()
-                fileHandle.write(data)
-                fileHandle.closeFile()
-            } else {
-                try? data.write(to: logURL)
-            }
-        }
+        print("🔍 [Proxy] \(message)")
     }
 
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
@@ -62,6 +53,30 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
         guard let httpsURL = components?.url else { return false }
         
         logToFile("🔍 Resource Request: \(httpsURL.absoluteString)")
+        
+        // 1. Check Cache first (only for media segments, not for playlists)
+        if httpsURL.pathExtension != "m3u8", let cachedData = cacheManager.getCachedData(for: httpsURL) {
+            logToFile("📦 Cache Hit: \(httpsURL.lastPathComponent)")
+            
+            if let contentRequest = loadingRequest.contentInformationRequest {
+                contentRequest.contentType = self.utiFromMimeType(nil, url: httpsURL)
+                contentRequest.contentLength = Int64(cachedData.count)
+                contentRequest.isByteRangeAccessSupported = true
+            }
+            
+            if let dataRequest = loadingRequest.dataRequest {
+                let start = Int(dataRequest.requestedOffset)
+                let length = Int(dataRequest.requestedLength)
+                if start < cachedData.count {
+                    let end = min(start + length, cachedData.count)
+                    dataRequest.respond(with: cachedData.subdata(in: start..<end))
+                }
+            }
+            
+            loadingRequest.finishLoading()
+            return true
+        }
+        
         if let range = loadingRequest.dataRequest?.requestedOffset {
              logToFile("   -> Range Offset: \(range), Length: \(loadingRequest.dataRequest?.requestedLength ?? 0)")
         }
@@ -144,7 +159,17 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
                     let rewritten = self.rewritePlaylist(playlistString, masterURL: httpsURL)
                     responseData = rewritten.data(using: .utf8) ?? data
                     self.logToFile("   -> Rewrote playlist (\(responseData.count) bytes)")
+                    
+                    // If it's a VOD playlist, start pre-fetching segments
+                    if rewritten.contains("#EXT-X-PLAYLIST-TYPE:VOD") {
+                        self.logToFile("🎬 Detected VOD playlist. Starting background pre-fetch...")
+                        self.prefetchSegments(rewritten, baseURL: httpsURL.deletingLastPathComponent())
+                    }
                 }
+            } else {
+                // Cache the segment
+                self.cacheManager.cacheData(data, for: httpsURL)
+                self.logToFile("💾 Cached segment: \(httpsURL.lastPathComponent)")
             }
             
             // 1. Set Content Information (MIME type and Length)
@@ -203,6 +228,14 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
     private func rewritePlaylist(_ playlist: String, masterURL: URL) -> String {
         let lines = playlist.components(separatedBy: .newlines)
         
+        // 1. Identify playlist type
+        let isMasterPlaylist = lines.contains { $0.contains("#EXT-X-STREAM-INF") }
+        let isMediaPlaylist = lines.contains { $0.contains("#EXTINF") }
+        
+        // 2. Extract master security tokens
+        let masterComponents = URLComponents(url: masterURL, resolvingAgainstBaseURL: false)
+        let masterQueryItems = masterComponents?.queryItems ?? []
+        
         var rewrittenLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#USP") }.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             
@@ -215,14 +248,29 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
                 return line
             }
             
-            // For segment lines, we keep them relative and MINIMAL
-            return trimmed
+            // For variant and segment lines, we should merge the master tokens
+            guard let url = URL(string: trimmed, relativeTo: masterURL) else { return line }
+            var comp = URLComponents(url: url, resolvingAgainstBaseURL: true)
+            
+            var currentQueryItems = comp?.queryItems ?? []
+            for item in masterQueryItems {
+                if !currentQueryItems.contains(where: { $0.name == item.name }) {
+                    currentQueryItems.append(item)
+                }
+            }
+            comp?.queryItems = currentQueryItems
+            
+            // We return a simplified absolute URL string for the player
+            return comp?.url?.absoluteString ?? trimmed
         }
         
-        // Ensure the player knows this is VOD
-        if !rewrittenLines.contains(where: { $0.contains("#EXT-X-PLAYLIST-TYPE") }) {
-            if let index = rewrittenLines.firstIndex(where: { $0.hasPrefix("#EXT-X-VERSION") }) {
-                rewrittenLines.insert("#EXT-X-PLAYLIST-TYPE:VOD", at: index + 1)
+        // 3. Apply VOD tag ONLY to Media Playlists that are definitively finished
+        // (Never add it to Master Playlists)
+        if !isMasterPlaylist && isMediaPlaylist && !rewrittenLines.contains(where: { $0.contains("#EXT-X-PLAYLIST-TYPE") }) {
+            if rewrittenLines.contains(where: { $0.contains("#EXT-X-ENDLIST") }) {
+                if let index = rewrittenLines.firstIndex(where: { $0.hasPrefix("#EXT-X-VERSION") }) {
+                    rewrittenLines.insert("#EXT-X-PLAYLIST-TYPE:VOD", at: index + 1)
+                }
             }
         }
         
@@ -254,7 +302,7 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         if challenge.protectionSpace.authenticationMethod == "NSURLAuthenticationMethodProxyBasic" {
-            let credential = URLCredential(user: proxyConfig.user, password: proxyConfig.pass, persistence: .forSession)
+            let credential = URLCredential(user: proxyConfig?.user ?? "", password: proxyConfig?.pass ?? "", persistence: .forSession)
             completionHandler(.useCredential, credential)
         } else if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
             // Only bypass if explicitly requested in config? For now handle default.
@@ -262,5 +310,48 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
+    }
+    
+    private func prefetchSegments(_ playlist: String, baseURL: URL) {
+        let lines = playlist.components(separatedBy: .newlines)
+        let segments = lines.filter { !$0.trimVariablePath().isEmpty && !$0.hasPrefix("#") }
+        
+        guard !prefetchingURLs.contains(baseURL) else { return }
+        prefetchingURLs.insert(baseURL)
+        
+        Task.detached(priority: .background) { [weak self] in
+            defer {
+                Task { @MainActor in
+                    self?.prefetchingURLs.remove(baseURL)
+                }
+            }
+            guard let self = self else { return }
+            for segment in segments {
+                guard let segmentURL = URL(string: segment, relativeTo: baseURL) else { continue }
+                
+                // Check if already cached
+                if MediaCacheManager.shared.getCachedData(for: segmentURL) != nil {
+                    continue
+                }
+                
+                print("🔄 Pre-fetching segment: \(segmentURL.lastPathComponent)")
+                do {
+                    let (data, _) = try await self.getSession().data(from: segmentURL)
+                    MediaCacheManager.shared.cacheData(data, for: segmentURL)
+                } catch {
+                    print("⚠️ Pre-fetch failed for \(segmentURL.lastPathComponent): \(error)")
+                }
+                
+                // Add a small delay to avoid saturating bandwidth
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            }
+            print("✅ Background pre-fetch complete.")
+        }
+    }
+}
+
+extension String {
+    func trimVariablePath() -> String {
+        return self.components(separatedBy: "?").first?.trimmingCharacters(in: .whitespaces) ?? self.trimmingCharacters(in: .whitespaces)
     }
 }
