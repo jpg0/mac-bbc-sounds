@@ -54,27 +54,42 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
         
         logToFile("🔍 Resource Request: \(httpsURL.absoluteString)")
         
-        // 1. Check Cache first (only for media segments, not for playlists)
-        if httpsURL.pathExtension != "m3u8", let cachedData = cacheManager.getCachedData(for: httpsURL) {
-            logToFile("📦 Cache Hit: \(httpsURL.lastPathComponent)")
+        // 1. Check Cache first
+        if let cachedData = cacheManager.getCachedData(for: httpsURL) {
+            var serveFromCacheFirst = false
             
-            if let contentRequest = loadingRequest.contentInformationRequest {
-                contentRequest.contentType = self.utiFromMimeType(nil, url: httpsURL)
-                contentRequest.contentLength = Int64(cachedData.count)
-                contentRequest.isByteRangeAccessSupported = true
-            }
-            
-            if let dataRequest = loadingRequest.dataRequest {
-                let start = Int(dataRequest.requestedOffset)
-                let length = Int(dataRequest.requestedLength)
-                if start < cachedData.count {
-                    let end = min(start + length, cachedData.count)
-                    dataRequest.respond(with: cachedData.subdata(in: start..<end))
+            if httpsURL.pathExtension != "m3u8" {
+                serveFromCacheFirst = true // Media segments are always static
+            } else if let playlistString = String(data: cachedData, encoding: .utf8) {
+                // Determine if the cached playlist is static (Master Playlist or VOD Variant)
+                if playlistString.contains("#EXT-X-STREAM-INF") || 
+                   playlistString.contains("#EXT-X-PLAYLIST-TYPE:VOD") || 
+                   playlistString.contains("#EXT-X-ENDLIST") {
+                    serveFromCacheFirst = true
                 }
             }
             
-            loadingRequest.finishLoading()
-            return true
+            if serveFromCacheFirst {
+                logToFile("📦 Cache Hit (Pre-Network): \(httpsURL.lastPathComponent)")
+                
+                if let contentRequest = loadingRequest.contentInformationRequest {
+                    contentRequest.contentType = self.utiFromMimeType((httpsURL.pathExtension == "m3u8") ? "application/vnd.apple.mpegurl" : nil, url: httpsURL)
+                    contentRequest.contentLength = Int64(cachedData.count)
+                    contentRequest.isByteRangeAccessSupported = (httpsURL.pathExtension != "m3u8")
+                }
+                
+                if let dataRequest = loadingRequest.dataRequest {
+                    let start = Int(dataRequest.requestedOffset)
+                    let length = Int(dataRequest.requestedLength)
+                    if start < cachedData.count {
+                        let end = min(start + length, cachedData.count)
+                        dataRequest.respond(with: cachedData.subdata(in: start..<end))
+                    }
+                }
+                
+                loadingRequest.finishLoading()
+                return true
+            }
         }
         
         if let range = loadingRequest.dataRequest?.requestedOffset {
@@ -108,8 +123,32 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
         let task = getSession().dataTask(with: request) { [weak self] data, response, error in
             guard let self = self else { return }
             
-            if let error = error {
+            if let error = error as NSError? {
                 self.logToFile("❌ Proxy Network Error [\(httpsURL.lastPathComponent)]: \(error.localizedDescription)")
+                
+                // OFFLINE FALLBACK
+                if let cachedData = self.cacheManager.getCachedData(for: httpsURL) {
+                    self.logToFile("♻️ Offline Fallback: Serving cached \(httpsURL.lastPathComponent)")
+                    
+                    if let contentRequest = loadingRequest.contentInformationRequest {
+                        let uti = self.utiFromMimeType((httpsURL.pathExtension == "m3u8") ? "application/vnd.apple.mpegurl" : nil, url: httpsURL)
+                        contentRequest.contentType = uti
+                        contentRequest.contentLength = Int64(cachedData.count)
+                        contentRequest.isByteRangeAccessSupported = (httpsURL.pathExtension != "m3u8")
+                    }
+                    
+                    if let dataRequest = loadingRequest.dataRequest {
+                        let start = Int(dataRequest.requestedOffset)
+                        let length = Int(dataRequest.requestedLength)
+                        if start < cachedData.count {
+                            let end = min(start + length, cachedData.count)
+                            dataRequest.respond(with: cachedData.subdata(in: start..<end))
+                        }
+                    }
+                    loadingRequest.finishLoading()
+                    return
+                }
+                
                 loadingRequest.finishLoading(with: error)
                 return
             }
@@ -148,6 +187,28 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
             if httpResponse.statusCode != 200 {
                 let errorMsg = "BBC Proxy Error: \(httpResponse.statusCode) for \(httpsURL.lastPathComponent)"
                 self.logToFile("❌ \(errorMsg)")
+                
+                // Try offline fallback for 4xx/5xx errors as well, just in case
+                if let cachedData = self.cacheManager.getCachedData(for: httpsURL) {
+                    self.logToFile("♻️ Offline Fallback (HTTP \(httpResponse.statusCode)): Serving cached \(httpsURL.lastPathComponent)")
+                    if let contentRequest = loadingRequest.contentInformationRequest {
+                        let uti = self.utiFromMimeType((httpsURL.pathExtension == "m3u8") ? "application/vnd.apple.mpegurl" : nil, url: httpsURL)
+                        contentRequest.contentType = uti
+                        contentRequest.contentLength = Int64(cachedData.count)
+                        contentRequest.isByteRangeAccessSupported = (httpsURL.pathExtension != "m3u8")
+                    }
+                    if let dataRequest = loadingRequest.dataRequest {
+                        let start = Int(dataRequest.requestedOffset)
+                        let length = Int(dataRequest.requestedLength)
+                        if start < cachedData.count {
+                            let end = min(start + length, cachedData.count)
+                            dataRequest.respond(with: cachedData.subdata(in: start..<end))
+                        }
+                    }
+                    loadingRequest.finishLoading()
+                    return
+                }
+
                 self.onProxyError?(errorMsg)
                 loadingRequest.finishLoading(with: NSError(domain: "BBCProxy", code: httpResponse.statusCode))
                 return
@@ -159,6 +220,10 @@ class BBCProxyResourceLoaderDelegate: NSObject, AVAssetResourceLoaderDelegate, U
                     let rewritten = self.rewritePlaylist(playlistString, masterURL: httpsURL)
                     responseData = rewritten.data(using: .utf8) ?? data
                     self.logToFile("   -> Rewrote playlist (\(responseData.count) bytes)")
+                    
+                    // Cache the rewritten playlist so we can fall back to it offline
+                    self.cacheManager.cacheData(responseData, for: httpsURL)
+                    self.logToFile("💾 Cached playlist: \(httpsURL.lastPathComponent)")
                     
                     // If it's a VOD playlist, start pre-fetching segments
                     if rewritten.contains("#EXT-X-PLAYLIST-TYPE:VOD") {

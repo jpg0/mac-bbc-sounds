@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var viewModel: AppViewModel
     @State private var showingSettings = false
+    @State private var selectedTab = "search"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +37,8 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
 
             Divider()
 
@@ -106,8 +108,26 @@ struct ContentView: View {
                 Divider()
             }
 
-            SearchView()
-                .environmentObject(viewModel)
+            Picker("", selection: $selectedTab) {
+                Text("Search").tag("search")
+                Text("Tracklist").tag("tracklist")
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            
+            Divider()
+            
+            VStack(spacing: 0) {
+                if selectedTab == "search" {
+                    SearchView()
+                        .environmentObject(viewModel)
+                } else {
+                    TracklistView(player: viewModel.player)
+                }
+            }
+            .frame(height: 300)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }

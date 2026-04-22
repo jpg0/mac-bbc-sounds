@@ -4,12 +4,13 @@ import AppKit
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
-    var popover: NSPopover!
+    var panel: NSPanel!
     var marqueeView: MacMarqueeView!
     let viewModel = AppViewModel()
     
     // We must hold onto this so the sink doesn't instantly deallocate
     private var marqueeTextCancellable: Any?
+    private var eventMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 1. Setup Status Item
@@ -17,16 +18,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         guard let button = statusItem.button else { return }
         
-        // 2. Setup Popover
+        // 2. Setup Panel (replacing NSPopover for right-aligned control)
         let contentView = ContentView()
             .environmentObject(viewModel)
-            // Adjust frame here to ensure the popover is properly sized
             .frame(width: 420, height: 520)
             
-        popover = NSPopover()
-        popover.contentSize = NSSize(width: 420, height: 520)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: contentView)
+        let hostingView = NSHostingView(rootView: contentView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        
+        let effectView = NSVisualEffectView()
+        effectView.material = .popover
+        effectView.state = .active
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 10
+        effectView.layer?.masksToBounds = true
+        
+        // Optional subtle border mirroring macOS native popovers
+        effectView.layer?.borderColor = NSColor.separatorColor.cgColor
+        effectView.layer?.borderWidth = 1
+        
+        effectView.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: effectView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor)
+        ])
+            
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.hasShadow = true
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.contentView = effectView
+        panel.level = .popUpMenu
         
         // 3. Add Custom Marquee Subview to Button
         marqueeView = MacMarqueeView(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
@@ -34,7 +63,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.addSubview(marqueeView)
         
         // Set action for clicking the standard button
-        button.action = #selector(togglePopover(_:))
+        button.action = #selector(togglePanel(_:))
         button.target = self
         
         // 4. Listen to ViewModel to show/hide the Marquee
@@ -61,13 +90,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
     }
 
-    @objc func togglePopover(_ sender: AnyObject?) {
-        guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(sender)
+    @objc func togglePanel(_ sender: AnyObject?) {
+        if panel.isVisible {
+            hidePanel()
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            showPanel()
+        }
+    }
+    
+    func showPanel() {
+        guard let button = statusItem.button, let window = button.window else { return }
+        
+        let rectInWindow = button.convert(button.bounds, to: nil)
+        let buttonRect = window.convertToScreen(rectInWindow)
+        var panelFrame = panel.frame
+        
+        // Align panel's left edge exactly with the button's left edge
+        // so the UI extends to the right of the icon
+        panelFrame.origin.x = buttonRect.minX
+        // Position immediately below the menu bar with 2.5px gap
+        panelFrame.origin.y = buttonRect.minY - panelFrame.height - 2.5
+        
+        panel.setFrame(panelFrame, display: true)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        
+        // Monitor for clicks outside the panel to dismiss it
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            if let panel = self?.panel, panel.isVisible {
+                self?.hidePanel()
+            }
+        }
+        
+        // Also listen for escape key locally when panel is focused
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { // escape
+                self?.hidePanel()
+                return nil
+            }
+            return event
+        }
+    }
+    
+    func hidePanel() {
+        panel.orderOut(nil)
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
         }
     }
 }

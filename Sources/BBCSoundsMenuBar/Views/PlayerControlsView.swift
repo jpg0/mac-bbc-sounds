@@ -3,7 +3,6 @@ import SwiftUI
 struct PlayerControlsView: View {
     @ObservedObject var player: PlayerService
     @Environment(\.colorScheme) var colorScheme
-    @State private var showingTracklist = false
 
     private var nowPlayingTrack: Segment? {
         player.currentTracks.first(where: { $0.isNowPlaying })
@@ -86,17 +85,6 @@ struct PlayerControlsView: View {
                         .help("Search on Spotify")
                     }
 
-                    Button {
-                        withAnimation {
-                            showingTracklist.toggle()
-                        }
-                    } label: {
-                        Image(systemName: showingTracklist ? "list.bullet.circle.fill" : "list.bullet.circle")
-                            .font(.title2)
-                            .foregroundColor(showingTracklist ? .red : .secondary.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show Tracklist")
 
                     Button {
                         player.stop()
@@ -189,11 +177,6 @@ struct PlayerControlsView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 12)
 
-            if showingTracklist {
-                Divider()
-                TracklistView(player: player)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
         }
         .background(Color(NSColor.windowBackgroundColor).opacity(0.3))
     }

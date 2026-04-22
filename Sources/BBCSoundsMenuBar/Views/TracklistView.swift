@@ -12,11 +12,16 @@ struct TracklistView: View {
                 .padding(.vertical, 8)
             
             if player.currentTracks.isEmpty {
-                Text("No tracks found.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
+                Spacer()
+                HStack {
+                    Spacer()
+                    Text("No tracks found.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.bottom, 12)
+                Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -33,9 +38,9 @@ struct TracklistView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 200)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.03))
     }
 }
