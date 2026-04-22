@@ -12,6 +12,7 @@ class AppViewModel: ObservableObject {
     @Published var resumeSession: PlaybackSession? = nil
     @Published var marqueeText: String? = nil
     @Published var marqueeStartTime: Date? = nil
+    @Published var playbackHistory: [String: PlaybackSession] = [:]
 
     // Proxy Settings
     @Published var proxyEnabled: Bool { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "ProxyEnabled"); updateServicesProxy() } }
@@ -71,6 +72,13 @@ class AppViewModel: ObservableObject {
             .store(in: &cancellables)
         
         loadSavedSession()
+        loadPlaybackHistory()
+        
+        player.onSessionSaved = { [weak self] in
+            Task { @MainActor in
+                self?.loadPlaybackHistory()
+            }
+        }
         
         updateServicesProxy()
         handleCommandLineArgs()
@@ -124,7 +132,19 @@ class AppViewModel: ObservableObject {
                 updatedProgramme.durationInSeconds = fullProg.durationInSeconds
             }
             
+            
             player.play(url: url, programme: updatedProgramme)
+            
+            // Auto-resume from history if available and not finished
+            if let history = playbackHistory[programme.id], history.time > 15 {
+                // If duration is missing or more than 30s left, resume. 
+                // Otherwise start from beginning (assume finished)
+                let remaining = (history.duration ?? Double(updatedProgramme.durationInSeconds)) - history.time
+                if remaining > 30 || history.duration == nil {
+                    player.seek(to: history.time)
+                    print("🔄 Auto-resuming \(programme.name) from \(Int(history.time))s")
+                }
+            }
         } catch {
             errorMessage = "Could not load stream: \(error.localizedDescription)"
         }
@@ -218,6 +238,19 @@ class AppViewModel: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: "LastPlaybackSession")
             }
         }
+    }
+
+    private func loadPlaybackHistory() {
+        let historyData = UserDefaults.standard.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
+        var loadedHistory: [String: PlaybackSession] = [:]
+        let decoder = JSONDecoder()
+        
+        for (pid, data) in historyData {
+            if let session = try? decoder.decode(PlaybackSession.self, from: data) {
+                loadedHistory[pid] = session
+            }
+        }
+        self.playbackHistory = loadedHistory
     }
 
     func refreshCache() async {

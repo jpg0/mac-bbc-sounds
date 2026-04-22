@@ -22,6 +22,7 @@ class PlayerService: ObservableObject {
     
     var proxyConfig: ProxyConfiguration?
     var bbcSounds: BBCSoundsService?
+    var onSessionSaved: (() -> Void)?
 
     private var player: AVPlayer?
     private var statusObserver: AnyCancellable?
@@ -400,12 +401,22 @@ class PlayerService: ObservableObject {
 
     private func saveSession() {
         guard let programme = currentProgramme, !programme.isLive else { return }
-        let session = PlaybackSession(programme: programme, time: currentTime, date: Date())
-        if let data = try? JSONEncoder().encode(session) {
-            UserDefaults.standard.set(data, forKey: "LastPlaybackSession")
-            lastSavedTime = currentTime
-            logToDebugFile("💾 Session saved: \(programme.name) at \(Int(currentTime))s")
-        }
+        let session = PlaybackSession(programme: programme, time: currentTime, duration: duration, date: Date())
+        
+        guard let data = try? JSONEncoder().encode(session) else { return }
+        
+        // 1. Save as the single "last" session for the resume prompt
+        UserDefaults.standard.set(data, forKey: "LastPlaybackSession")
+        
+        // 2. Save into the global history dictionary
+        var history = UserDefaults.standard.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
+        history[programme.id] = data
+        UserDefaults.standard.set(history, forKey: "PlaybackHistory")
+        
+        lastSavedTime = currentTime
+        logToDebugFile("💾 Session saved: \(programme.name) at \(Int(currentTime))s / \(Int(duration))s")
+        
+        onSessionSaved?()
     }
 
     func openInSpotify(track: Segment) {

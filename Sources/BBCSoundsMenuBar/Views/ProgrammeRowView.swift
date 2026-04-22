@@ -8,6 +8,12 @@ struct ProgrammeRowView: View {
         viewModel.player.currentProgramme?.id == programme.id
     }
 
+    private var progress: Double? {
+        guard let session = viewModel.playbackHistory[programme.id], 
+              let dur = session.duration, dur > 0 else { return nil }
+        return session.time / dur
+    }
+
     var body: some View {
         Button {
             Task {
@@ -37,8 +43,36 @@ struct ProgrammeRowView: View {
                             .foregroundColor(.red)
                             .font(.caption)
                     }
+                    
+                    // Progress bar overlay
+                    if let progress = progress, !programme.isLive {
+                        VStack {
+                            Spacer()
+                            if progress > 0.95 {
+                                ZStack {
+                                    Color.black.opacity(0.4)
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                        .font(.system(size: 14))
+                                }
+                                .frame(height: 16)
+                            } else {
+                                GeometryReader { geo in
+                                    ZStack(alignment: .leading) {
+                                        Rectangle()
+                                            .fill(Color.gray.opacity(0.3))
+                                        Rectangle()
+                                            .fill(Color.red)
+                                            .frame(width: geo.size.width * progress)
+                                    }
+                                }
+                                .frame(height: 3)
+                            }
+                        }
+                    }
                 }
                 .frame(width: 48, height: 48)
+                .cornerRadius(4)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .center, spacing: 4) {
