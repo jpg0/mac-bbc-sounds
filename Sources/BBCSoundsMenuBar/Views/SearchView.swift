@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SearchView: View {
     @EnvironmentObject var viewModel: AppViewModel
+    @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,7 +11,7 @@ struct SearchView: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
                 TextField("Search BBC Radio...", text: $viewModel.searchQuery)
-                    .textFieldStyle(.plain)
+                    .focused($isSearchFocused)
                     .onChange(of: viewModel.searchQuery) { _ in
                         viewModel.onSearchQueryChanged()
                     }
@@ -32,6 +33,10 @@ struct SearchView: View {
             }
             .padding(8)
             .background(Color(NSColor.controlBackgroundColor))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                isSearchFocused = true
+            }
             .cornerRadius(8)
             .padding(8)
 

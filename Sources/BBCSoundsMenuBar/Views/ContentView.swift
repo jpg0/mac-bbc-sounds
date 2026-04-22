@@ -117,7 +117,7 @@ struct ContentView: View {
             .padding(.vertical, 8)
             
             Divider()
-            
+            Spacer().frame(height: 1)
             VStack(spacing: 0) {
                 if selectedTab == "search" {
                     SearchView()
@@ -126,7 +126,7 @@ struct ContentView: View {
                     TracklistView(player: viewModel.player)
                 }
             }
-            .frame(height: 300)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

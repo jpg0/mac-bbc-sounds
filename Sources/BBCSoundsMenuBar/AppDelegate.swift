@@ -1,6 +1,11 @@
 import SwiftUI
 import AppKit
 
+class FocusablePanel: NSPanel {
+    override var canBecomeKey: Bool { return true }
+    override var canBecomeMain: Bool { return true }
+}
+
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
@@ -11,6 +16,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // We must hold onto this so the sink doesn't instantly deallocate
     private var marqueeTextCancellable: Any?
     private var eventMonitor: Any?
+    private var localEventMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 1. Setup Status Item
@@ -21,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 2. Setup Panel (replacing NSPopover for right-aligned control)
         let contentView = ContentView()
             .environmentObject(viewModel)
-            .frame(width: 420, height: 520)
+            .frame(width: 420, height: 600)
             
         let hostingView = NSHostingView(rootView: contentView)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
@@ -45,8 +51,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             hostingView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor)
         ])
             
-        panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
+        panel = FocusablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 600),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -56,6 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isOpaque = false
         panel.contentView = effectView
         panel.level = .popUpMenu
+        panel.becomesKeyOnlyIfNeeded = false // Ensure text fields can always gain focus
         
         // 3. Add Custom Marquee Subview to Button
         marqueeView = MacMarqueeView(frame: NSRect(x: 0, y: 0, width: 80, height: 22))
@@ -117,13 +124,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Monitor for clicks outside the panel to dismiss it
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            if let panel = self?.panel, panel.isVisible {
-                self?.hidePanel()
+            guard let self = self, self.panel.isVisible else { return }
+            
+            // Check if the click is outside the panel's frame
+            let mouseLocation = NSEvent.mouseLocation
+            if !self.panel.frame.contains(mouseLocation) {
+                self.hidePanel()
             }
         }
         
         // Also listen for escape key locally when panel is focused
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 { // escape
                 self?.hidePanel()
                 return nil
@@ -137,6 +148,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
+        }
+        if let localMonitor = localEventMonitor {
+            NSEvent.removeMonitor(localMonitor)
+            localEventMonitor = nil
         }
     }
 }
