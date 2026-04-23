@@ -186,6 +186,39 @@ class PlayerService: ObservableObject {
         seek(to: Double(segment.startTime))
     }
 
+    func skipToNextTrack() {
+        guard !currentTracks.isEmpty else { return }
+        // Find the first track that starts after current time (+ small buffer)
+        if let next = currentTracks.first(where: { Double($0.startTime) > currentTime + 2 }) {
+            skipToTrack(next)
+        }
+    }
+
+    func skipToPreviousTrack() {
+        guard !currentTracks.isEmpty else { return }
+        
+        // Find the track we are currently in
+        let sortedTracks = currentTracks.sorted { $0.startTime < $1.startTime }
+        guard let currentIndex = sortedTracks.firstIndex(where: { $0.isNowPlaying }) else {
+            // Fallback: just go back 15s if no tracks
+            seek(by: -15)
+            return
+        }
+        
+        let currentTrack = sortedTracks[currentIndex]
+        
+        // If we are more than 3 seconds into the current track, go to start of it
+        if currentTime > Double(currentTrack.startTime) + 3 {
+            skipToTrack(currentTrack)
+        } else if currentIndex > 0 {
+            // Otherwise go to previous track
+            skipToTrack(sortedTracks[currentIndex - 1])
+        } else {
+            // We are in the first track, just go to 0
+            seek(to: 0)
+        }
+    }
+
     private func updateNowPlayingTrack() {
         guard let prog = currentProgramme, !prog.isLive else { return }
         guard !isUpdatingTracks else { return }
@@ -275,6 +308,8 @@ class PlayerService: ObservableObject {
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
         commandCenter.seekForwardCommand.removeTarget(nil)
         commandCenter.seekBackwardCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)
+        commandCenter.previousTrackCommand.removeTarget(nil)
         
         commandCenter.playCommand.addTarget { [weak self] _ in
             self?.resume()
@@ -306,6 +341,16 @@ class PlayerService: ObservableObject {
         
         commandCenter.seekBackwardCommand.addTarget { [weak self] _ in
             self?.seek(by: -15)
+            return .success
+        }
+
+        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            self?.skipToNextTrack()
+            return .success
+        }
+
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            self?.skipToPreviousTrack()
             return .success
         }
     }

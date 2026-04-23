@@ -128,7 +128,18 @@ struct PlayerControlsView: View {
             HStack(spacing: 0) {
                 // Centered Transport Controls
                 Spacer()
-                HStack(spacing: 24) {
+                HStack(spacing: 20) {
+                    Button {
+                        player.skipToPreviousTrack()
+                    } label: {
+                        Image(systemName: "backward.end.fill")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .disabled(player.currentTracks.isEmpty)
+                    .help("Previous Track")
+
                     Button {
                         player.seek(by: -15)
                     } label: {
@@ -154,6 +165,17 @@ struct PlayerControlsView: View {
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
+
+                    Button {
+                        player.skipToNextTrack()
+                    } label: {
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 14))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .disabled(player.currentTracks.isEmpty)
+                    .help("Next Track")
                 }
                 Spacer()
                 
