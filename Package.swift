@@ -15,6 +15,11 @@ let package = Package(
             name: "BBCSoundsMenuBar",
             dependencies: [],
             path: "Sources/BBCSoundsMenuBar"
+        ),
+        .testTarget(
+            name: "BBCSoundsMenuBarTests",
+            dependencies: ["BBCSoundsMenuBar"],
+            path: "Tests/BBCSoundsMenuBarTests"
         )
     ]
 )

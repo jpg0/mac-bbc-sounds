@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import Security
 
 enum BBCSoundsError: LocalizedError {
     case invalidURL
@@ -17,7 +19,62 @@ enum BBCSoundsError: LocalizedError {
 }
 
 actor BBCSoundsService {
-    private let session = URLSession.shared
+    internal var session = URLSession.shared
+    internal var proxyConfig: ProxyConfiguration?
+    internal var proxyForDiscovery = false
+    private var sessionDelegate: URLSessionDelegate?
+    
+    func updateProxy(config: ProxyConfiguration?, proxyForDiscovery: Bool) {
+        self.proxyConfig = config
+        self.proxyForDiscovery = proxyForDiscovery
+        
+        if proxyForDiscovery, let proxy = config {
+            let sessionConfig = URLSessionConfiguration.default
+            configureProxy(on: sessionConfig, proxy: proxy)
+            let proxyDelegate = BBCProxySessionDelegate(proxyConfig: proxy)
+            self.sessionDelegate = proxyDelegate
+            self.session = URLSession(configuration: sessionConfig, delegate: proxyDelegate, delegateQueue: nil)
+            logToDebugFile("🔌 Configured discovery session with proxy: \(proxy.host):\(proxy.port)")
+        } else {
+            self.sessionDelegate = nil
+            self.session = URLSession.shared
+            logToDebugFile("🔌 Configured discovery session with default URLSession")
+        }
+    }
+    
+    private func configureProxy(on config: URLSessionConfiguration, proxy: ProxyConfiguration) {
+        if #available(macOS 14.0, iOS 17.0, *) {
+            let proxyEndpoint = NWEndpoint.hostPort(
+                host: NWEndpoint.Host(proxy.host),
+                port: NWEndpoint.Port(rawValue: UInt16(proxy.port)) ?? 89
+            )
+            
+            let tlsOptions = NWProtocolTLS.Options()
+            if proxy.skipVerify {
+                sec_protocol_options_set_verify_block(tlsOptions.securityProtocolOptions, { (metadata, sec_trust, completionHandler) in
+                    completionHandler(true)
+                }, DispatchQueue.global())
+            }
+            
+            let nwProxyConfig = Network.ProxyConfiguration(httpCONNECTProxy: proxyEndpoint, tlsOptions: tlsOptions)
+            nwProxyConfig.applyCredential(username: proxy.user, password: proxy.pass)
+            
+            config.proxyConfigurations = [nwProxyConfig]
+        } else {
+            config.connectionProxyDictionary = [
+                "HTTPEnable": 1,
+                "HTTPProxy": proxy.host,
+                "HTTPPort": proxy.port,
+                "HTTPProxyUsername": proxy.user,
+                "HTTPProxyPassword": proxy.pass,
+                "HTTPSEnable": 1,
+                "HTTPSProxy": proxy.host,
+                "HTTPSPort": proxy.port,
+                "HTTPSProxyUsername": proxy.user,
+                "HTTPSProxyPassword": proxy.pass
+            ]
+        }
+    }
     
     private func logToDebugFile(_ msg: String) {
         print("📡 [BBCSounds] \(msg)")
@@ -117,6 +174,18 @@ actor BBCSoundsService {
         // Step 1: Get VPID from programme metadata
         let vpid = try await fetchVPID(pid: pid)
         logToDebugFile("Resolved VPID: \(vpid)")
+        
+        // Directly resolve Akamai HLS live streams if mapped
+        if let pool = BBCSoundsService.liveStationPools[vpid] {
+            let isUK = (proxyConfig != nil) || vpid.contains("anthems") || vpid.contains("unwind") || vpid.contains("sports_extra")
+            let domain = isUK ? "as-hls-uk-live.akamaized.net" : "as-hls-ww-live.akamaized.net"
+            let region = isUK ? "uk" : "ww"
+            let urlString = "https://\(domain)/\(pool)/live/\(region)/\(vpid)/\(vpid).isml/\(vpid)-audio%3d96000.norewind.m3u8"
+            if let url = URL(string: urlString) {
+                logToDebugFile("✅ Resolved live stream URL from Akamai: \(url.absoluteString)")
+                return url
+            }
+        }
         
         // Step 2: Query Media Selector with fallbacks
         let mediasets = ["pc", "iptv-all", "mobile-cellular-main"]
@@ -228,6 +297,73 @@ actor BBCSoundsService {
     }
     
     // MARK: - Private Helpers
+    
+    private static let liveStationPools: [String: String] = [
+        "bbc_radio_one": "pool_01505109",
+        "bbc_1xtra": "pool_92079267",
+        "bbc_radio_one_dance": "pool_62063831",
+        "bbc_radio_one_anthems": "pool_11351741",
+        "bbc_radio_two": "pool_74208725",
+        "bbc_radio_three": "pool_23461179",
+        "bbc_radio_three_unwind": "pool_30624046",
+        "bbc_radio_fourfm": "pool_55057080",
+        "bbc_radio_four_extra": "pool_26173715",
+        "bbc_radio_five_live": "pool_89021708",
+        "bbc_6music": "pool_81827798",
+        "bbc_radio_five_live_sports_extra": "pool_47700285",
+        "bbc_asian_network": "pool_22108647",
+        "bbc_world_service": "pool_87948813",
+        "bbc_radio_coventry_warwickshire": "pool_79805333",
+        "bbc_radio_essex": "pool_23657270",
+        "bbc_radio_hereford_worcester": "pool_80112859",
+        "bbc_radio_berkshire": "pool_64162474",
+        "bbc_radio_bristol": "pool_41858929",
+        "bbc_radio_cambridge": "pool_21074581",
+        "bbc_radio_cornwall": "pool_72477894",
+        "bbc_radio_cumbria": "pool_85294020",
+        "bbc_radio_cymru": "pool_24792333",
+        "bbc_radio_cymru_2": "pool_98610936",
+        "bbc_radio_derby": "pool_63732303",
+        "bbc_radio_devon": "pool_08856933",
+        "bbc_radio_foyle": "pool_43178797",
+        "bbc_radio_gloucestershire": "pool_74607547",
+        "bbc_radio_guernsey": "pool_65313722",
+        "bbc_radio_humberside": "pool_43379345",
+        "bbc_radio_jersey": "pool_14000630",
+        "bbc_radio_kent": "pool_17754185",
+        "bbc_radio_lancashire": "pool_98146551",
+        "bbc_radio_leeds": "pool_50115440",
+        "bbc_radio_leicester": "pool_04542919",
+        "bbc_radio_lincolnshire": "pool_77667780",
+        "bbc_london": "pool_98137350",
+        "bbc_radio_manchester": "pool_25317916",
+        "bbc_radio_merseyside": "pool_46699767",
+        "bbc_radio_nan_gaidheal": "pool_01935182",
+        "bbc_radio_newcastle": "pool_46887953",
+        "bbc_radio_norfolk": "pool_61510571",
+        "bbc_radio_northampton": "pool_73827654",
+        "bbc_radio_nottingham": "pool_96088503",
+        "bbc_radio_orkney": "pool_50082558",
+        "bbc_radio_oxford": "pool_19212690",
+        "bbc_radio_scotland_fm": "pool_43322914",
+        "bbc_radio_scotland_mw": "pool_59378121",
+        "bbc_radio_sheffield": "pool_19967704",
+        "bbc_radio_shropshire": "pool_83478576",
+        "bbc_radio_solent": "pool_11685351",
+        "bbc_radio_solent_west_dorset": "pool_48517520",
+        "bbc_radio_somerset_sound": "pool_00727706",
+        "bbc_radio_stoke": "pool_34849862",
+        "bbc_radio_suffolk": "pool_18067288",
+        "bbc_radio_surrey": "pool_27374427",
+        "bbc_radio_sussex": "pool_76643803",
+        "bbc_tees": "pool_08918172",
+        "bbc_radio_ulster": "pool_31244774",
+        "bbc_radio_wales_fm": "pool_97517794",
+        "bbc_radio_wiltshire": "pool_44240917",
+        "bbc_wm": "pool_05353924",
+        "bbc_radio_york": "pool_90848428",
+        "bbc_three_counties_radio": "pool_69997923"
+    ]
     
     private func fetchVPID(pid: String) async throws -> String {
         // Live station fallback: service IDs like bbc_radio_one are their own VPID
@@ -459,5 +595,42 @@ struct ProgrammesSegmentData: Codable {
     let track_title: String?
     let title: String?
     let duration: Int?
+}
+
+class BBCProxySessionDelegate: NSObject, URLSessionTaskDelegate, URLSessionDelegate {
+    private let proxyConfig: ProxyConfiguration
+    
+    init(proxyConfig: ProxyConfiguration) {
+        self.proxyConfig = proxyConfig
+        super.init()
+    }
+    
+    private func handleChallenge(_ challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        print("📡 [BBCSounds] DEBUG: RECEIVED CHALLENGE: \(challenge.protectionSpace.authenticationMethod) on host: \(challenge.protectionSpace.host)")
+        if challenge.protectionSpace.authenticationMethod == "NSURLAuthenticationMethodProxyBasic" {
+            let credential = URLCredential(user: proxyConfig.user, password: proxyConfig.pass, persistence: .forSession)
+            completionHandler(.useCredential, credential)
+        } else if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            if proxyConfig.skipVerify {
+                if let trust = challenge.protectionSpace.serverTrust {
+                    completionHandler(.useCredential, URLCredential(trust: trust))
+                } else {
+                    completionHandler(.performDefaultHandling, nil)
+                }
+            } else {
+                completionHandler(.performDefaultHandling, nil)
+            }
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+    
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
 }
 

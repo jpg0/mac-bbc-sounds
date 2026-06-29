@@ -27,7 +27,7 @@ class PlayerService: ObservableObject {
     private var player: AVPlayer?
     private var statusObserver: AnyCancellable?
     private var durationObserver: AnyCancellable?
-    private var resourceLoaderDelegate: BBCProxyResourceLoaderDelegate?
+    private var localProxyServer: LocalProxyServer?
     private var trackUpdateTask: Task<Void, Never>?
     private var lastSavedTime: Double = 0
     private var isUpdatingTracks = false
@@ -44,21 +44,46 @@ class PlayerService: ObservableObject {
     func play(url: URL, programme: Programme) {
         stop()
         playerError = nil
-        
-        // Use custom resource loader for caching/proxying
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.scheme = "bbcproxy"
-        guard let proxyURL = components?.url else {
-            logToDebugFile("❌ Could not create proxy URL")
-            return
+
+        let item: AVPlayerItem
+
+        if let proxy = proxyConfig {
+            // Proxy configured: route ALL streams (live and on-demand) through a local
+            // loopback server. This presents plain http:// URLs to AVPlayer, avoiding
+            // the CoreMediaErrorDomain -12881 error that blocks the bbcproxy:// path
+            // for live HLS segments, and also fixes on-demand streams via proxy.
+            let server = LocalProxyServer(proxyConfig: proxy)
+            do {
+                let port = try server.start()
+                self.localProxyServer = server
+
+                var comps = URLComponents()
+                comps.scheme = "http"
+                comps.host = "127.0.0.1"
+                comps.port = Int(port)
+                comps.path = "/playlist"
+                comps.queryItems = [URLQueryItem(name: "url", value: url.absoluteString)]
+
+                guard let localURL = comps.url else {
+                    logToDebugFile("❌ Could not build local proxy URL")
+                    server.stop()
+                    self.localProxyServer = nil
+                    return
+                }
+
+                logToDebugFile("🔀 Stream routed via local proxy (\(programme.isLive ? "live" : "on-demand")): \(localURL)")
+                item = AVPlayerItem(url: localURL)
+            } catch {
+                logToDebugFile("❌ LocalProxyServer failed to start: \(error.localizedDescription)")
+                item = AVPlayerItem(url: url)
+            }
+        } else {
+            // No proxy: play directly — works fine for on-demand outside the UK
+            // and for users who don't need geo-unblocking.
+            logToDebugFile("▶️ Playing directly (no proxy): \(url.absoluteString)")
+            item = AVPlayerItem(url: url)
         }
-        
-        let asset = AVURLAsset(url: proxyURL)
-        let delegate = BBCProxyResourceLoaderDelegate(proxyConfig: proxyConfig)
-        self.resourceLoaderDelegate = delegate
-        asset.resourceLoader.setDelegate(delegate, queue: delegate.getQueue())
-        
-        let item = AVPlayerItem(asset: asset)
+
         
         // Caching Requirements:
         // For Live: Minimal buffer (AVPlayer handles this naturally for live playlists)
@@ -77,7 +102,6 @@ class PlayerService: ObservableObject {
         
         // Observe time
         player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
-            print("🎬 Current Time: \(String(format: "%.1f", time.seconds))s")
             Task { @MainActor in
                 self?.currentTime = time.seconds
                 self?.updateNowPlayingTrack()
@@ -171,7 +195,9 @@ class PlayerService: ObservableObject {
         activeTrack = nil
         trackUpdateTask?.cancel()
         trackUpdateTask = nil
-        
+        localProxyServer?.stop()
+        localProxyServer = nil
+
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         durationObserver = nil
         statusObserver = nil

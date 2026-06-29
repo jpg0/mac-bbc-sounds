@@ -87,6 +87,9 @@ class AppViewModel: ObservableObject {
     func updateServicesProxy() {
         let config = proxyEnabled ? ProxyConfiguration(host: proxyHost, port: Int(proxyPort) ?? 89, user: proxyUser, pass: proxyPass, skipVerify: proxySkipVerify) : nil
         player.proxyConfig = config
+        Task {
+            await bbcSounds.updateProxy(config: config, proxyForDiscovery: proxyForDiscovery)
+        }
     }
 
     func onSearchQueryChanged() {

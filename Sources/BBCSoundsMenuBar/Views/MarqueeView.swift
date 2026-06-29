@@ -3,7 +3,9 @@ import Cocoa
 class MacMarqueeView: NSView {
     var text: String = "" {
         didSet {
-            setupMarquee()
+            let size = (text as NSString).size(withAttributes: attributes)
+            textWidth = size.width
+            updateTimerState()
         }
     }
     var speed: CGFloat = 40
@@ -33,30 +35,49 @@ class MacMarqueeView: NSView {
         return nil
     }
     
-    private func setupMarquee() {
-        timer?.invalidate()
-        
-        let size = (text as NSString).size(withAttributes: attributes)
-        textWidth = size.width
-        offset = bounds.width > 0 ? bounds.width : 80
-        
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.offset -= (self.speed / 60.0)
-            if self.offset < -self.textWidth {
-                self.offset = self.bounds.width
-            }
-            self.needsDisplay = true
+    override var isHidden: Bool {
+        didSet {
+            updateTimerState()
         }
+    }
+    
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateTimerState()
+    }
+    
+    private func updateTimerState() {
+        let shouldRun = !isHidden && window != nil && !text.isEmpty
         
-        if let timer = timer {
-            RunLoop.main.add(timer, forMode: .common)
-            timer.fireDate = Date().addingTimeInterval(0.3)
+        if shouldRun {
+            if timer == nil {
+                offset = bounds.width > 0 ? bounds.width : 80
+                
+                timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                    guard let self = self else { return }
+                    self.offset -= (self.speed / 60.0)
+                    if self.offset < -self.textWidth {
+                        self.offset = self.bounds.width
+                    }
+                    self.needsDisplay = true
+                }
+                
+                if let timer = timer {
+                    RunLoop.main.add(timer, forMode: .common)
+                    timer.fireDate = Date().addingTimeInterval(0.3)
+                }
+            }
+        } else {
+            if timer != nil {
+                timer?.invalidate()
+                timer = nil
+            }
         }
     }
     
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
+        guard !text.isEmpty else { return }
         
         let textHeight = (text as NSString).size(withAttributes: attributes).height
         let yPos = (bounds.height - textHeight) / 2.0
