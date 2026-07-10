@@ -3,7 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var viewModel: AppViewModel
     @State private var showingSettings = false
-    @State private var selectedTab = "search"
+    @State private var selectedTab = "bookmarks"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,6 +109,7 @@ struct ContentView: View {
             }
 
             Picker("", selection: $selectedTab) {
+                Text("Bookmarks").tag("bookmarks")
                 Text("Search").tag("search")
                 Text("Tracklist").tag("tracklist")
             }
@@ -119,7 +120,10 @@ struct ContentView: View {
             Divider()
             Spacer().frame(height: 1)
             VStack(spacing: 0) {
-                if selectedTab == "search" {
+                if selectedTab == "bookmarks" {
+                    BookmarksView()
+                        .environmentObject(viewModel)
+                } else if selectedTab == "search" {
                     SearchView()
                         .environmentObject(viewModel)
                 } else {

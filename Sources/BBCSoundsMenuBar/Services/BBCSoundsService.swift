@@ -111,20 +111,77 @@ actor BBCSoundsService {
                 let artworkURL = (item.image_url ?? item.now?.episode_image_url)?
                     .replacingOccurrences(of: "{recipe}", with: "400x400")
                 
+                let type = isLive ? "live" : (item.type == "container_item" ? "brand" : "episode")
+                
                 programmes.append(Programme(
                     id: id,
                     index: 0,
                     name: name,
                     channel: item.network?.short_title ?? item.now?.station_name ?? "BBC",
-                    duration: nil,
+                    duration: item.duration?.label,
                     description: description,
                     firstBroadcast: nil,
                     artworkURL: artworkURL,
-                    isLive: isLive
+                    isLive: isLive,
+                    type: type,
+                    releaseLabel: item.release?.label
                 ))
             }
         }
         return programmes
+    }
+    
+    // Resolves the latest episode's metadata and VPID for a brand/series container
+    func resolveLatestEpisode(brandPID: String) async throws -> (episodePID: String, vpid: String, title: String?, releaseLabel: String?, duration: String?) {
+        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=sequential&type=episode&experience=domestic"
+        guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
+        
+        let data = try await request(url)
+        let rmsResponse = try JSONDecoder().decode(RMSPlayableResponse.self, from: data)
+        
+        guard let latestItem = rmsResponse.data?.first, let episodePID = latestItem.id else {
+            throw BBCSoundsError.noVPIDFound
+        }
+        
+        // Fetch the specific version PID (VPID) for this episode
+        let vpid = try await fetchVPID(pid: episodePID)
+        
+        return (
+            episodePID: episodePID,
+            vpid: vpid,
+            title: latestItem.titles?.secondary,
+            releaseLabel: latestItem.release?.label,
+            duration: latestItem.duration?.label
+        )
+    }
+    
+    // Fetches the list of previous episodes for a container PID (brand/series)
+    func fetchContainerEpisodes(brandPID: String, limit: Int = 15) async throws -> [Programme] {
+        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=sequential&type=episode&experience=domestic&limit=\(limit)"
+        guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
+        
+        let data = try await request(url)
+        let rmsResponse = try JSONDecoder().decode(RMSPlayableResponse.self, from: data)
+        
+        guard let items = rmsResponse.data else { return [] }
+        
+        return items.compactMap { item -> Programme? in
+            guard let id = item.id else { return nil }
+            let title = item.titles?.secondary ?? "Episode"
+            return Programme(
+                id: id,
+                index: 0,
+                name: title,
+                channel: "",
+                duration: item.duration?.label,
+                description: nil,
+                firstBroadcast: nil,
+                artworkURL: nil,
+                isLive: false,
+                type: "episode",
+                releaseLabel: item.release?.label
+            )
+        }
     }
     
     func getProgramme(pid: String) async throws -> Programme {
@@ -465,6 +522,8 @@ struct RMSItem: Codable {
     let image_url: String?
     let network: RMSNetwork?
     let now: RMSNow?
+    let release: RMSRelease?
+    let duration: RMSDuration?
 }
 
 struct RMSNow: Codable {
@@ -477,6 +536,17 @@ struct RMSNow: Codable {
 
 struct RMSTitles: Codable {
     let primary: String
+    let secondary: String?
+}
+
+struct RMSRelease: Codable {
+    let date: String?
+    let label: String?
+}
+
+struct RMSDuration: Codable {
+    let value: Int?
+    let label: String?
 }
 
 struct RMSSynopses: Codable {
@@ -550,6 +620,9 @@ struct RMSPlayableResponse: Codable {
 
 struct RMSPlayableItem: Codable {
     let id: String?
+    let titles: RMSTitles?
+    let release: RMSRelease?
+    let duration: RMSDuration?
 }
 
 // MARK: - RMS Segments

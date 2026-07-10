@@ -481,7 +481,8 @@ class PlayerService: ObservableObject {
         
         // 2. Save into the global history dictionary
         var history = UserDefaults.standard.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
-        history[programme.id] = data
+        let historyKey = programme.resolvedPID ?? programme.id
+        history[historyKey] = data
         UserDefaults.standard.set(history, forKey: "PlaybackHistory")
         
         lastSavedTime = currentTime

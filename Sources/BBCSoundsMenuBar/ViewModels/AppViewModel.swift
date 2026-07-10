@@ -14,6 +14,22 @@ class AppViewModel: ObservableObject {
     @Published var marqueeStartTime: Date? = nil
     @Published var playbackHistory: [String: PlaybackSession] = [:]
 
+    struct LatestEpisodeInfo: Codable, Equatable {
+        let episodePID: String
+        let vpid: String
+        let title: String?
+        let releaseLabel: String?
+        let duration: String?
+    }
+    @Published var brandLatestEpisodes: [String: LatestEpisodeInfo] = [:]
+
+    // History of fetched episodes per container
+    @Published var brandEpisodes: [String: [Programme]] = [:]
+    @Published var loadingEpisodes: Set<String> = []
+
+    // Persistent Bookmarks
+    @Published var bookmarkedShows: [Programme] = []
+
     // Proxy Settings
     @Published var proxyEnabled: Bool { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "ProxyEnabled"); updateServicesProxy() } }
     @Published var proxyHost: String { didSet { UserDefaults.standard.set(proxyHost, forKey: "ProxyHost"); updateServicesProxy() } }
@@ -73,6 +89,7 @@ class AppViewModel: ObservableObject {
         
         loadSavedSession()
         loadPlaybackHistory()
+        loadBookmarks()
         
         player.onSessionSaved = { [weak self] in
             Task { @MainActor in
@@ -112,11 +129,82 @@ class AppViewModel: ObservableObject {
         errorMessage = nil
         do {
             searchResults = try await bbcSounds.search(query: searchQuery)
+            resolveLatestEpisodes(for: searchResults)
         } catch {
             errorMessage = "Search failed: \(error.localizedDescription)"
             searchResults = []
         }
         isSearching = false
+    }
+
+    private func resolveLatestEpisodes(for programmes: [Programme]) {
+        for programme in programmes {
+            guard programme.type == "brand" || programme.type == "series" else { continue }
+            let pid = programme.id
+            if brandLatestEpisodes[pid] != nil { continue }
+            
+            Task {
+                do {
+                    let latest = try await bbcSounds.resolveLatestEpisode(brandPID: pid)
+                    await MainActor.run {
+                        self.brandLatestEpisodes[pid] = LatestEpisodeInfo(
+                            episodePID: latest.episodePID,
+                            vpid: latest.vpid,
+                            title: latest.title,
+                            releaseLabel: latest.releaseLabel,
+                            duration: latest.duration
+                        )
+                    }
+                } catch {
+                    print("⚠️ Failed to resolve latest episode for brand \(pid): \(error)")
+                }
+            }
+        }
+    }
+
+    func loadEpisodes(for brandPID: String) {
+        guard brandEpisodes[brandPID] == nil else { return }
+        loadingEpisodes.insert(brandPID)
+        
+        Task {
+            do {
+                let eps = try await bbcSounds.fetchContainerEpisodes(brandPID: brandPID)
+                self.brandEpisodes[brandPID] = eps
+                self.loadingEpisodes.remove(brandPID)
+            } catch {
+                print("⚠️ Failed to fetch episodes for \(brandPID): \(error)")
+                self.loadingEpisodes.remove(brandPID)
+            }
+        }
+    }
+
+    func isBookmarked(_ programme: Programme) -> Bool {
+        bookmarkedShows.contains(where: { $0.id == programme.id })
+    }
+
+    func toggleBookmark(_ programme: Programme) {
+        if isBookmarked(programme) {
+            bookmarkedShows.removeAll(where: { $0.id == programme.id })
+        } else {
+            bookmarkedShows.append(programme)
+            // Resolve latest episode in background for the new bookmark
+            resolveLatestEpisodes(for: [programme])
+        }
+        saveBookmarks()
+    }
+
+    private func loadBookmarks() {
+        if let data = UserDefaults.standard.data(forKey: "BookmarkedShows"),
+           let list = try? JSONDecoder().decode([Programme].self, from: data) {
+            self.bookmarkedShows = list
+            resolveLatestEpisodes(for: list)
+        }
+    }
+
+    private func saveBookmarks() {
+        if let data = try? JSONEncoder().encode(bookmarkedShows) {
+            UserDefaults.standard.set(data, forKey: "BookmarkedShows")
+        }
     }
 
     func playProgramme(_ programme: Programme) async {
@@ -135,11 +223,10 @@ class AppViewModel: ObservableObject {
                 updatedProgramme.durationInSeconds = fullProg.durationInSeconds
             }
             
-            
             player.play(url: url, programme: updatedProgramme)
             
             // Auto-resume from history if available and not finished
-            if let history = playbackHistory[programme.id], history.time > 15 {
+            if let history = playbackHistory[resolvedPID], history.time > 15 {
                 // If duration is missing or more than 30s left, resume. 
                 // Otherwise start from beginning (assume finished)
                 let remaining = (history.duration ?? Double(updatedProgramme.durationInSeconds)) - history.time
