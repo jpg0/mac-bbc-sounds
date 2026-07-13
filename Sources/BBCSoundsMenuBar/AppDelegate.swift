@@ -115,6 +115,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Align panel's left edge exactly with the button's left edge
         // so the UI extends to the right of the icon
         panelFrame.origin.x = buttonRect.minX
+        
+        // Ensure the panel does not go off-screen horizontally
+        if let screen = window.screen ?? NSScreen.main ?? NSScreen.screens.first {
+            let screenVisibleFrame = screen.visibleFrame
+            let maxAllowedX = screenVisibleFrame.maxX - 5.0
+            if panelFrame.origin.x + panelFrame.width > maxAllowedX {
+                panelFrame.origin.x = maxAllowedX - panelFrame.width
+            }
+            let minAllowedX = screenVisibleFrame.minX + 5.0
+            if panelFrame.origin.x < minAllowedX {
+                panelFrame.origin.x = minAllowedX
+            }
+        }
+        
         // Position immediately below the menu bar with 2.5px gap
         panelFrame.origin.y = buttonRect.minY - panelFrame.height - 2.5
         
