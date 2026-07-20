@@ -8,7 +8,7 @@ class PlayerService: ObservableObject {
     @Published var isPlaying = false
     @Published var volume: Float {
         didSet {
-            UserDefaults.standard.set(volume, forKey: "PlayerVolume")
+            UserDefaults.app.set(volume, forKey: "PlayerVolume")
         }
     }
     @Published var currentProgramme: Programme? = nil
@@ -34,7 +34,7 @@ class PlayerService: ObservableObject {
     private var currentLoadingArtworkURL: URL?
 
     init() {
-        self.volume = UserDefaults.standard.value(forKey: "PlayerVolume") as? Float ?? 0.7
+        self.volume = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
     }
 
     private func logToDebugFile(_ msg: String) {
@@ -477,13 +477,13 @@ class PlayerService: ObservableObject {
         guard let data = try? JSONEncoder().encode(session) else { return }
         
         // 1. Save as the single "last" session for the resume prompt
-        UserDefaults.standard.set(data, forKey: "LastPlaybackSession")
+        UserDefaults.app.set(data, forKey: "LastPlaybackSession")
         
         // 2. Save into the global history dictionary
-        var history = UserDefaults.standard.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
+        var history = UserDefaults.app.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
         let historyKey = programme.resolvedPID ?? programme.id
         history[historyKey] = data
-        UserDefaults.standard.set(history, forKey: "PlaybackHistory")
+        UserDefaults.app.set(history, forKey: "PlaybackHistory")
         
         lastSavedTime = currentTime
         logToDebugFile("💾 Session saved: \(programme.name) at \(Int(currentTime))s / \(Int(duration))s")

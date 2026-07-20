@@ -30,5 +30,8 @@ struct BookmarksView: View {
                 Spacer()
             }
         }
+        .onAppear {
+            viewModel.refreshBookmarks(force: false)
+        }
     }
 }

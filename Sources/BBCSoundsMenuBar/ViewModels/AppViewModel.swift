@@ -1,6 +1,12 @@
 import Foundation
 import Combine
 
+extension UserDefaults {
+    static var app: UserDefaults {
+        return UserDefaults(suiteName: "com.trillica.BBCSoundsMenuBar") ?? .standard
+    }
+}
+
 @MainActor
 class AppViewModel: ObservableObject {
     @Published var searchQuery = ""
@@ -29,15 +35,18 @@ class AppViewModel: ObservableObject {
 
     // Persistent Bookmarks
     @Published var bookmarkedShows: [Programme] = []
+    @Published var lastBookmarkRefreshDate: Date? = nil
+    @Published var isRefreshingBookmarks = false
+    private var bookmarkAutoRefreshTask: Task<Void, Never>?
 
     // Proxy Settings
-    @Published var proxyEnabled: Bool { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "ProxyEnabled"); updateServicesProxy() } }
-    @Published var proxyHost: String { didSet { UserDefaults.standard.set(proxyHost, forKey: "ProxyHost"); updateServicesProxy() } }
-    @Published var proxyPort: String { didSet { UserDefaults.standard.set(proxyPort, forKey: "ProxyPort"); updateServicesProxy() } }
-    @Published var proxyUser: String { didSet { UserDefaults.standard.set(proxyUser, forKey: "ProxyUser"); updateServicesProxy() } }
-    @Published var proxyPass: String { didSet { UserDefaults.standard.set(proxyPass, forKey: "ProxyPass"); updateServicesProxy() } }
-    @Published var proxySkipVerify: Bool { didSet { UserDefaults.standard.set(proxySkipVerify, forKey: "ProxySkipVerify"); updateServicesProxy() } }
-    @Published var proxyForDiscovery: Bool { didSet { UserDefaults.standard.set(proxyForDiscovery, forKey: "ProxyForDiscovery"); updateServicesProxy() } }
+    @Published var proxyEnabled: Bool { didSet { UserDefaults.app.set(proxyEnabled, forKey: "ProxyEnabled"); updateServicesProxy() } }
+    @Published var proxyHost: String { didSet { UserDefaults.app.set(proxyHost, forKey: "ProxyHost"); updateServicesProxy() } }
+    @Published var proxyPort: String { didSet { UserDefaults.app.set(proxyPort, forKey: "ProxyPort"); updateServicesProxy() } }
+    @Published var proxyUser: String { didSet { UserDefaults.app.set(proxyUser, forKey: "ProxyUser"); updateServicesProxy() } }
+    @Published var proxyPass: String { didSet { UserDefaults.app.set(proxyPass, forKey: "ProxyPass"); updateServicesProxy() } }
+    @Published var proxySkipVerify: Bool { didSet { UserDefaults.app.set(proxySkipVerify, forKey: "ProxySkipVerify"); updateServicesProxy() } }
+    @Published var proxyForDiscovery: Bool { didSet { UserDefaults.app.set(proxyForDiscovery, forKey: "ProxyForDiscovery"); updateServicesProxy() } }
 
     let player: PlayerService
     private let bbcSounds: BBCSoundsService
@@ -46,13 +55,13 @@ class AppViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     init() {
-        self.proxyEnabled = UserDefaults.standard.bool(forKey: "ProxyEnabled")
-        self.proxyHost = UserDefaults.standard.string(forKey: "ProxyHost") ?? ""
-        self.proxyPort = UserDefaults.standard.string(forKey: "ProxyPort") ?? "89"
-        self.proxyUser = UserDefaults.standard.string(forKey: "ProxyUser") ?? ""
-        self.proxyPass = UserDefaults.standard.string(forKey: "ProxyPass") ?? ""
-        self.proxySkipVerify = UserDefaults.standard.bool(forKey: "ProxySkipVerify")
-        self.proxyForDiscovery = UserDefaults.standard.bool(forKey: "ProxyForDiscovery")
+        self.proxyEnabled = UserDefaults.app.bool(forKey: "ProxyEnabled")
+        self.proxyHost = UserDefaults.app.string(forKey: "ProxyHost") ?? ""
+        self.proxyPort = UserDefaults.app.string(forKey: "ProxyPort") ?? "89"
+        self.proxyUser = UserDefaults.app.string(forKey: "ProxyUser") ?? ""
+        self.proxyPass = UserDefaults.app.string(forKey: "ProxyPass") ?? ""
+        self.proxySkipVerify = UserDefaults.app.bool(forKey: "ProxySkipVerify")
+        self.proxyForDiscovery = UserDefaults.app.bool(forKey: "ProxyForDiscovery")
         
         let pService = PlayerService()
         self.player = pService
@@ -87,9 +96,14 @@ class AppViewModel: ObservableObject {
             }
             .store(in: &cancellables)
         
+        if let date = UserDefaults.app.object(forKey: "LastBookmarkRefreshDate") as? Date {
+            self.lastBookmarkRefreshDate = date
+        }
+        
         loadSavedSession()
         loadPlaybackHistory()
         loadBookmarks()
+        startBookmarkAutoRefreshTimer()
         
         player.onSessionSaved = { [weak self] in
             Task { @MainActor in
@@ -137,11 +151,11 @@ class AppViewModel: ObservableObject {
         isSearching = false
     }
 
-    private func resolveLatestEpisodes(for programmes: [Programme]) {
+    private func resolveLatestEpisodes(for programmes: [Programme], force: Bool = false) {
         for programme in programmes {
             guard programme.type == "brand" || programme.type == "series" else { continue }
             let pid = programme.id
-            if brandLatestEpisodes[pid] != nil { continue }
+            if !force && brandLatestEpisodes[pid] != nil { continue }
             
             Task {
                 do {
@@ -194,16 +208,63 @@ class AppViewModel: ObservableObject {
     }
 
     private func loadBookmarks() {
-        if let data = UserDefaults.standard.data(forKey: "BookmarkedShows"),
+        if let data = UserDefaults.app.data(forKey: "BookmarkedShows"),
            let list = try? JSONDecoder().decode([Programme].self, from: data) {
             self.bookmarkedShows = list
-            resolveLatestEpisodes(for: list)
+            refreshBookmarks(force: false)
+        }
+    }
+
+    func refreshBookmarks(force: Bool = false) {
+        guard !bookmarkedShows.isEmpty else { return }
+        
+        let shouldRefresh: Bool
+        if force {
+            shouldRefresh = true
+        } else if let lastRefresh = lastBookmarkRefreshDate {
+            // Refresh if older than 24 hours (86,400 seconds)
+            shouldRefresh = Date().timeIntervalSince(lastRefresh) >= 24 * 3600
+        } else {
+            shouldRefresh = true
+        }
+        
+        guard shouldRefresh else { return }
+        
+        isRefreshingBookmarks = true
+        // Clear cached container episodes so expanding shows fetches fresh data
+        brandEpisodes.removeAll()
+        
+        resolveLatestEpisodes(for: bookmarkedShows, force: true)
+        
+        let now = Date()
+        lastBookmarkRefreshDate = now
+        UserDefaults.app.set(now, forKey: "LastBookmarkRefreshDate")
+        
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            await MainActor.run {
+                self.isRefreshingBookmarks = false
+            }
+        }
+    }
+
+    private func startBookmarkAutoRefreshTimer() {
+        bookmarkAutoRefreshTask?.cancel()
+        bookmarkAutoRefreshTask = Task {
+            while !Task.isCancelled {
+                // Check every hour (3,600 seconds) whether 24h has elapsed
+                try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    self.refreshBookmarks(force: false)
+                }
+            }
         }
     }
 
     private func saveBookmarks() {
         if let data = try? JSONEncoder().encode(bookmarkedShows) {
-            UserDefaults.standard.set(data, forKey: "BookmarkedShows")
+            UserDefaults.app.set(data, forKey: "BookmarkedShows")
         }
     }
 
@@ -315,23 +376,23 @@ class AppViewModel: ObservableObject {
 
     func dismissResume() {
         resumeSession = nil
-        UserDefaults.standard.removeObject(forKey: "LastPlaybackSession")
+        UserDefaults.app.removeObject(forKey: "LastPlaybackSession")
     }
 
     private func loadSavedSession() {
-        if let data = UserDefaults.standard.data(forKey: "LastPlaybackSession"),
+        if let data = UserDefaults.app.data(forKey: "LastPlaybackSession"),
            let session = try? JSONDecoder().decode(PlaybackSession.self, from: data) {
             // Only suggest resume if it's from the last 24 hours
             if abs(session.date.timeIntervalSinceNow) < 24 * 3600 {
                 self.resumeSession = session
             } else {
-                UserDefaults.standard.removeObject(forKey: "LastPlaybackSession")
+                UserDefaults.app.removeObject(forKey: "LastPlaybackSession")
             }
         }
     }
 
     private func loadPlaybackHistory() {
-        let historyData = UserDefaults.standard.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
+        let historyData = UserDefaults.app.dictionary(forKey: "PlaybackHistory") as? [String: Data] ?? [:]
         var loadedHistory: [String: PlaybackSession] = [:]
         let decoder = JSONDecoder()
         
