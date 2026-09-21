@@ -93,16 +93,16 @@ final class MockSonosDevice {
         let params = NWParameters.tcp
         params.requiredInterfaceType = .loopback
 
-        let l = try NWListener(using: params, on: .any)
-        self.listener = l
+        let listenerInstance = try NWListener(using: params, on: .any)
+        self.listener = listenerInstance
 
         let readyGroup = DispatchGroup()
         readyGroup.enter()
 
-        l.stateUpdateHandler = { [weak self] state in
+        listenerInstance.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready:
-                self?.port = l.port?.rawValue ?? 0
+                self?.port = listenerInstance.port?.rawValue ?? 0
                 readyGroup.leave()
             case .failed(let err):
                 print("⚠️ [MockSonosDevice] Listener failed: \(err)")
@@ -112,11 +112,11 @@ final class MockSonosDevice {
             }
         }
 
-        l.newConnectionHandler = { [weak self] conn in
+        listenerInstance.newConnectionHandler = { [weak self] conn in
             self?.handleConnection(conn)
         }
 
-        l.start(queue: queue)
+        listenerInstance.start(queue: queue)
         readyGroup.wait()
 
         guard port > 0 else {
@@ -233,16 +233,16 @@ final class MockSonosDevice {
 
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
-            let hp = line.split(separator: ":", maxSplits: 1)
-            if hp.count == 2 {
-                headers[hp[0].trimmingCharacters(in: .whitespaces).lowercased()] = hp[1].trimmingCharacters(in: .whitespaces)
+            let headerParts = line.split(separator: ":", maxSplits: 1)
+            if headerParts.count == 2 {
+                headers[headerParts[0].trimmingCharacters(in: .whitespaces).lowercased()] = headerParts[1].trimmingCharacters(in: .whitespaces)
             }
         }
 
         let bodyText = String(data: bodyData, encoding: .utf8) ?? ""
 
         // Route by path
-        if method == "GET" && path == "/xml/device_description.xml" {
+        if method == "GET" && (path == "/xml/device_description.xml" || path == "/device_description.xml") {
             let xml = makeDeviceDescriptionXML()
             send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(xml.utf8))
             return
@@ -298,112 +298,83 @@ final class MockSonosDevice {
 
     // MARK: - SOAP Handlers
 
+    private func soapEnvelope(body: String) -> String {
+        return """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            \(body)
+          </s:Body>
+        </s:Envelope>
+        """
+    }
+
+    private func unescapeXMLEntities(_ string: String) -> String {
+        return string
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
     private func handleAVTransportAction(action: String, bodyText: String) -> String {
         switch action {
         case "SetAVTransportURI":
-            let uri = extractTag(name: "CurrentURI", from: bodyText)
+            let rawURI = extractTag(name: "CurrentURI", from: bodyText)
+            let uri = rawURI.map { unescapeXMLEntities($0) }
             let rawMeta = extractTag(name: "CurrentURIMetaData", from: bodyText)
-            let unescapedMeta = rawMeta?
-                .replacingOccurrences(of: "&lt;", with: "<")
-                .replacingOccurrences(of: "&gt;", with: ">")
-                .replacingOccurrences(of: "&quot;", with: "\"")
-                .replacingOccurrences(of: "&amp;", with: "&")
+            let unescapedMeta = rawMeta.map { unescapeXMLEntities($0) }
 
             lock.withLock {
                 _receivedURI = uri
                 _receivedDIDLLite = unescapedMeta
             }
 
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:SetAVTransportURIResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "Play":
             lock.withLock { _transportState = "PLAYING" }
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:PlayResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "Pause":
             lock.withLock { _transportState = "PAUSED_PLAYBACK" }
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:PauseResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:PauseResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "Stop":
             lock.withLock { _transportState = "STOPPED" }
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:StopResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:StopResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "Seek":
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:SeekResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:SeekResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "GetTransportInfo":
             let state = transportState
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                  <CurrentTransportState>\(state)</CurrentTransportState>
-                  <CurrentTransportStatus>OK</CurrentTransportStatus>
-                  <CurrentSpeed>1</CurrentSpeed>
-                </u:GetTransportInfoResponse>
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: """
+            <u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+              <CurrentTransportState>\(state)</CurrentTransportState>
+              <CurrentTransportStatus>OK</CurrentTransportStatus>
+              <CurrentSpeed>1</CurrentSpeed>
+            </u:GetTransportInfoResponse>
+            """)
 
         case "GetPositionInfo":
             let dur = trackDuration
             let rel = trackRelTime
             let curURI = receivedURI ?? ""
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                  <Track>1</Track>
-                  <TrackDuration>\(dur)</TrackDuration>
-                  <TrackMetaData></TrackMetaData>
-                  <TrackURI>\(curURI)</TrackURI>
-                  <RelTime>\(rel)</RelTime>
-                  <AbsTime>\(rel)</AbsTime>
-                  <RelCount>2147483647</RelCount>
-                  <AbsCount>2147483647</AbsCount>
-                </u:GetPositionInfoResponse>
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: """
+            <u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+              <Track>1</Track>
+              <TrackDuration>\(dur)</TrackDuration>
+              <TrackMetaData></TrackMetaData>
+              <TrackURI>\(curURI)</TrackURI>
+              <RelTime>\(rel)</RelTime>
+              <AbsTime>\(rel)</AbsTime>
+              <RelCount>2147483647</RelCount>
+              <AbsCount>2147483647</AbsCount>
+            </u:GetPositionInfoResponse>
+            """)
 
         default:
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:\(action)Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:\(action)Response xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
         }
     }
 
@@ -413,39 +384,23 @@ final class MockSonosDevice {
             if let volStr = extractTag(name: "DesiredVolume", from: bodyText), let vol = Int(volStr) {
                 currentVolume = vol
             }
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:SetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:SetVolumeResponse xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\" />")
 
         case "GetVolume":
             let vol = currentVolume
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/envelope/">
-              <s:Body>
-                <u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
-                  <CurrentVolume>\(vol)</CurrentVolume>
-                </u:GetVolumeResponse>
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: """
+            <u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              <CurrentVolume>\(vol)</CurrentVolume>
+            </u:GetVolumeResponse>
+            """)
 
         default:
-            return """
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:\(action)Response xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1" />
-              </s:Body>
-            </s:Envelope>
-            """
+            return soapEnvelope(body: "<u:\(action)Response xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\" />")
         }
     }
 
     private func extractTag(name: String, from xml: String) -> String? {
-        let pattern = "<\(name)>(.*?)</\(name)>"
+        let pattern = "<(?:[a-zA-Z0-9_-]+:)?\(name)(?:\\s+[^>]*)?>(.*?)</(?:[a-zA-Z0-9_-]+:)?\(name)>"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
               let match = regex.firstMatch(in: xml, options: [], range: NSRange(location: 0, length: xml.utf16.count)),
               let range = Range(match.range(at: 1), in: xml) else {
