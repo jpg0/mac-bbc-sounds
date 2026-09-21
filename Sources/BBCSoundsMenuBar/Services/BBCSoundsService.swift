@@ -133,7 +133,7 @@ actor BBCSoundsService {
     
     // Resolves the latest episode's metadata and VPID for a brand/series container
     func resolveLatestEpisode(brandPID: String) async throws -> (episodePID: String, vpid: String, title: String?, releaseLabel: String?, duration: String?) {
-        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=sequential&type=episode&experience=domestic"
+        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=descending&type=episode&experience=domestic"
         guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
         
         let data = try await request(url)
@@ -157,7 +157,7 @@ actor BBCSoundsService {
     
     // Fetches the list of previous episodes for a container PID (brand/series)
     func fetchContainerEpisodes(brandPID: String, limit: Int = 15) async throws -> [Programme] {
-        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=sequential&type=episode&experience=domestic&limit=\(limit)"
+        let urlString = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(brandPID)&sort=descending&type=episode&experience=domestic&limit=\(limit)"
         guard let url = URL(string: urlString) else { throw BBCSoundsError.invalidURL }
         
         let data = try await request(url)
@@ -450,7 +450,7 @@ actor BBCSoundsService {
         
         if let type = response.programme?.type, type == "brand" || type == "series" {
             logToDebugFile("PID \(pid) is a \(type). Fetching latest playable item...")
-            let latestUrlStr = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(pid)&sort=sequential&type=episode&experience=domestic"
+            let latestUrlStr = "https://rms.api.bbc.co.uk/v2/programmes/playable?container=\(pid)&sort=descending&type=episode&experience=domestic"
             
             if let latestUrl = URL(string: latestUrlStr) {
                 do {
@@ -491,6 +491,7 @@ actor BBCSoundsService {
 
     private func request(_ url: URL, userAgent: String? = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36") async throws -> Data {
         var request = URLRequest(url: url)
+        request.cachePolicy = .useProtocolCachePolicy
         if let ua = userAgent {
             request.setValue(ua, forHTTPHeaderField: "User-Agent")
         }

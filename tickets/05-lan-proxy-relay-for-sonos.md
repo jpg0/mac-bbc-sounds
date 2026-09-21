@@ -4,10 +4,10 @@
 
 **Blocked by:** 03: Sonos AVTransport Direct Playback and Metadata
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Update `LocalProxyServer` to support binding to `0.0.0.0` (or specified host address) in addition to loopback `127.0.0.1`.
-- [ ] Add network utility to resolve the Mac's primary Wi-Fi / Ethernet LAN IP address.
-- [ ] Build a relay URL generator (`http://<lan-ip>:<port>/playlist?url=...`) for Sonos when `proxyConfig` is present.
-- [ ] Implement smart delivery decision logic: use direct BBC stream URL when no proxy is configured, and use LAN relay URL when proxy is enabled.
-- [ ] Write integration test verifying that a proxied stream playlist and segment can be fetched through `LocalProxyServer` via its LAN-bound interface.
+- [x] Update `LocalProxyServer` to support binding to `0.0.0.0` (or specified host address) in addition to loopback `127.0.0.1`.
+- [x] Add network utility to resolve the Mac's primary Wi-Fi / Ethernet LAN IP address.
+- [x] Build a relay URL generator (`http://<lan-ip>:<port>/playlist?url=...`) for Sonos when `proxyConfig` is present.
+- [x] Implement smart delivery decision logic: use direct BBC stream URL when no proxy is configured, and use LAN relay URL when proxy is enabled.
+- [x] Write integration test verifying that a proxied stream playlist and segment can be fetched through `LocalProxyServer` via its LAN-bound interface.

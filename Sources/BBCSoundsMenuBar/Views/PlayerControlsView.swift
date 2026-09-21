@@ -147,6 +147,7 @@ struct PlayerControlsView: View {
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
+                    .keyboardShortcut(.leftArrow, modifiers: [])
 
                     Button {
                         player.isPlaying ? player.pause() : player.resume()
@@ -157,6 +158,7 @@ struct PlayerControlsView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.primary)
+                    .keyboardShortcut(.space, modifiers: [])
                     
                     Button {
                         player.seek(by: 15)
@@ -165,6 +167,7 @@ struct PlayerControlsView: View {
                             .font(.title3)
                     }
                     .buttonStyle(.plain)
+                    .keyboardShortcut(.rightArrow, modifiers: [])
 
                     Button {
                         player.skipToNextTrack()

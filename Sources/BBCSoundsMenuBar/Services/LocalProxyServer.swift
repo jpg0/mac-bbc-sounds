@@ -9,10 +9,27 @@ import Network
 /// real content via `clientSession` (which carries proxy credentials) and returns it.
 final class LocalProxyServer {
 
+    /// Binding mode for the local proxy server.
+    public enum BindAddress: Equatable, Sendable {
+        case loopback // 127.0.0.1
+        case any      // 0.0.0.0 (all interfaces)
+    }
+
     // MARK: - Public
+
+    /// Binding mode configured for this server.
+    public let bindAddress: BindAddress
+
+    /// The host address to advertise in relay and playlist URLs (e.g. LAN IP address).
+    public var advertisedHost: String?
 
     /// The port the server is listening on. Valid only after `start()` succeeds.
     private(set) var port: UInt16 = 0
+
+    /// Whether the listener is currently active and listening.
+    public var isRunning: Bool {
+        listener != nil && port > 0
+    }
 
     /// The URLSession that carries proxy configuration. Use this to make requests
     /// that go through the upstream proxy (e.g. for tests or playlist pre-fetch).
@@ -26,7 +43,13 @@ final class LocalProxyServer {
 
     // MARK: - Init
 
-    init(proxyConfig: ProxyConfiguration?) {
+    init(
+        proxyConfig: ProxyConfiguration?,
+        bindAddress: BindAddress = .loopback,
+        advertisedHost: String? = nil
+    ) {
+        self.bindAddress = bindAddress
+        self.advertisedHost = advertisedHost
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = 15
 
@@ -74,7 +97,18 @@ final class LocalProxyServer {
     @discardableResult
     func start() throws -> UInt16 {
         let params = NWParameters.tcp
-        params.requiredInterfaceType = .loopback
+        switch bindAddress {
+        case .loopback:
+            params.requiredInterfaceType = .loopback
+            if advertisedHost == nil {
+                advertisedHost = "127.0.0.1"
+            }
+        case .any:
+            // Unrestricted interface allows listening on all interfaces (0.0.0.0)
+            if advertisedHost == nil {
+                advertisedHost = NetworkUtilities.primaryIPv4Address() ?? "127.0.0.1"
+            }
+        }
 
         let l = try NWListener(using: params, on: .any)
         self.listener = l
@@ -107,8 +141,29 @@ final class LocalProxyServer {
                           userInfo: [NSLocalizedDescriptionKey: "Listener failed to bind"])
         }
 
-        print("🟢 [LocalProxyServer] Listening on 127.0.0.1:\(port)")
+        if bindAddress == .any {
+            print("🟢 [LocalProxyServer] Listening on 0.0.0.0:\(port) (advertised: \(advertisedHost ?? "127.0.0.1"))")
+        } else {
+            print("🟢 [LocalProxyServer] Listening on 127.0.0.1:\(port)")
+        }
         return port
+    }
+
+    /// Generates a relay URL pointing to this proxy server for the given upstream URL.
+    /// - Parameters:
+    ///   - upstreamURL: The canonical upstream stream or playlist URL.
+    ///   - host: Optional override host to advertise (defaults to advertisedHost or "127.0.0.1").
+    /// - Returns: The HTTP URL on this proxy server.
+    public func relayURL(for upstreamURL: URL, host: String? = nil) -> URL? {
+        guard port > 0 else { return nil }
+        let effectiveHost = host ?? advertisedHost ?? "127.0.0.1"
+        var comps = URLComponents()
+        comps.scheme = "http"
+        comps.host = effectiveHost
+        comps.port = Int(port)
+        comps.path = "/playlist"
+        comps.queryItems = [URLQueryItem(name: "url", value: upstreamURL.absoluteString)]
+        return comps.url
     }
 
     func stop() {
@@ -165,13 +220,16 @@ final class LocalProxyServer {
         var req = URLRequest(url: target)
         req.httpMethod = method
 
-        // Forward Range and User-Agent headers
+        // Forward Range and User-Agent headers, and capture Host header
+        var requestHost: String?
         for line in lines.dropFirst() {
             guard !line.isEmpty else { break }
             let headerParts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard headerParts.count == 2 else { continue }
             let name = headerParts[0].lowercased()
-            if name == "range" || name == "user-agent" {
+            if name == "host" {
+                requestHost = headerParts[1]
+            } else if name == "range" || name == "user-agent" {
                 req.setValue(headerParts[1], forHTTPHeaderField: headerParts[0])
             }
         }
@@ -209,7 +267,7 @@ final class LocalProxyServer {
             // Rewrite m3u8 playlists so segment URLs route back through this server
             if target.pathExtension == "m3u8" || target.absoluteString.contains(".m3u8"),
                let text = String(data: responseData, encoding: .utf8) {
-                body = self.rewritePlaylist(text, masterURL: target).data(using: .utf8) ?? responseData
+                body = self.rewritePlaylist(text, masterURL: target, requestHost: requestHost).data(using: .utf8) ?? responseData
             } else {
                 // Cache segments after a successful fetch
                 self.cache.cacheData(responseData, for: target)
@@ -233,22 +291,34 @@ final class LocalProxyServer {
 
     // MARK: - Playlist Rewriting
 
-    private func rewritePlaylist(_ text: String, masterURL: URL) -> String {
+    func rewritePlaylist(_ text: String, masterURL: URL, requestHost: String? = nil) -> String {
         text.components(separatedBy: "\n").map { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             // Leave directives and blank lines alone
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return line }
             // Resolve relative or absolute segment/variant URLs
             guard let resolved = URL(string: trimmed, relativeTo: masterURL)?.absoluteURL else { return line }
-            return localURL(for: resolved)
+            return localURL(for: resolved, requestHost: requestHost)
         }.joined(separator: "\n")
     }
 
-    private func localURL(for upstream: URL) -> String {
+    func localURL(for upstream: URL, requestHost: String? = nil) -> String {
         var comps = URLComponents()
         comps.scheme = "http"
-        comps.host = "127.0.0.1"
-        comps.port = Int(port)
+
+        if let requestHost = requestHost {
+            let parts = requestHost.split(separator: ":")
+            comps.host = String(parts[0])
+            if parts.count > 1, let p = Int(parts[1]) {
+                comps.port = p
+            } else {
+                comps.port = Int(port)
+            }
+        } else {
+            comps.host = advertisedHost ?? "127.0.0.1"
+            comps.port = Int(port)
+        }
+
         comps.path = "/segment"
         comps.queryItems = [URLQueryItem(name: "url", value: upstream.absoluteString)]
         return comps.url?.absoluteString ?? upstream.absoluteString

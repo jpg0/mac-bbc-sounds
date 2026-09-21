@@ -176,8 +176,9 @@ class AppViewModel: ObservableObject {
         }
     }
 
-    func loadEpisodes(for brandPID: String) {
-        guard brandEpisodes[brandPID] == nil else { return }
+    func loadEpisodes(for brandPID: String, force: Bool = false) {
+        guard !loadingEpisodes.contains(brandPID) else { return }
+        if !force && brandEpisodes[brandPID] != nil { return }
         loadingEpisodes.insert(brandPID)
         
         Task {

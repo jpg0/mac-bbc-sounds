@@ -574,5 +574,95 @@ final class BBCSoundsMenuBarTests: XCTestCase {
 
         XCTAssertTrue(discoveryService.discoveredDevices.isEmpty, "Device should be pruned after exceeding TTL")
     }
+
+    // MARK: - Unit Tests: LocalProxyServer LAN Binding and Playlist Rewriting
+
+    func testLocalProxyServerLANBindingAndPlaylistRewriting() throws {
+        let server = LocalProxyServer(proxyConfig: nil, bindAddress: .any, advertisedHost: "192.168.1.100")
+        let port = try server.start()
+        defer { server.stop() }
+
+        XCTAssertEqual(server.bindAddress, .any)
+        XCTAssertEqual(server.advertisedHost, "192.168.1.100")
+        XCTAssertTrue(server.isRunning)
+
+        let masterPlaylist = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-STREAM-INF:BANDWIDTH=96000
+        http://example.com/audio/index_1.m3u8
+        #EXT-X-STREAM-INF:BANDWIDTH=320000
+        audio/index_2.m3u8
+        """
+
+        let masterURL = URL(string: "https://open.live.bbc.co.uk/master.m3u8")!
+
+        // When request comes with a LAN host header
+        let rewrittenWithHost = server.rewritePlaylist(masterPlaylist, masterURL: masterURL, requestHost: "192.168.1.100:\(port)")
+        XCTAssertTrue(
+            rewrittenWithHost.contains("http://192.168.1.100:\(port)/segment?url="),
+            "Rewritten playlist should use the LAN host header"
+        )
+        XCTAssertFalse(rewrittenWithHost.contains("127.0.0.1"), "Should not contain loopback IP")
+
+        // Relay URL generation
+        let relayURL = try XCTUnwrap(server.relayURL(for: masterURL))
+        XCTAssertEqual(relayURL.absoluteString, "http://192.168.1.100:\(port)/playlist?url=https://open.live.bbc.co.uk/master.m3u8")
+    }
+
+    // MARK: - Integration Test: LAN-Bound LocalProxyServer Fetch
+
+    func testLANBoundLocalProxyServerFetch() async throws {
+        let defaults = UserDefaults(suiteName: "com.trillica.BBCSoundsMenuBar") ?? UserDefaults.standard
+        let proxyEnabled = defaults.bool(forKey: "ProxyEnabled")
+        let proxyHost    = defaults.string(forKey: "ProxyHost") ?? ""
+        let proxyPort    = defaults.string(forKey: "ProxyPort") ?? "89"
+        let proxyUser    = defaults.string(forKey: "ProxyUser") ?? ""
+        let proxyPass    = defaults.string(forKey: "ProxyPass") ?? ""
+        let skipVerify   = defaults.bool(forKey: "ProxySkipVerify")
+
+        let proxyConfig = proxyEnabled ? ProxyConfiguration(
+            host: proxyHost,
+            port: Int(proxyPort) ?? 89,
+            user: proxyUser,
+            pass: proxyPass,
+            skipVerify: skipVerify
+        ) : nil
+
+        let lanIP = NetworkUtilities.primaryIPv4Address() ?? "127.0.0.1"
+
+        let server = LocalProxyServer(proxyConfig: proxyConfig, bindAddress: .any, advertisedHost: lanIP)
+        let port = try server.start()
+        defer { server.stop() }
+
+        XCTAssertTrue(server.isRunning)
+
+        let liveHLSURL = URL(string: "https://as-hls-uk-live.akamaized.net/pool_01505109/live/uk/bbc_radio_one/bbc_radio_one.isml/bbc_radio_one-audio=96000.norewind.m3u8")!
+        let relayURL = try XCTUnwrap(server.relayURL(for: liveHLSURL, host: lanIP))
+        XCTAssertEqual(relayURL.host, lanIP)
+
+        // 1. Fetch playlist through the LAN IP URL
+        let (playlistData, playlistResponse) = try await server.clientSession.data(from: relayURL)
+        let playlistHTTP = try XCTUnwrap(playlistResponse as? HTTPURLResponse)
+        XCTAssertEqual(playlistHTTP.statusCode, 200)
+
+        let playlistText = try XCTUnwrap(String(data: playlistData, encoding: .utf8))
+        XCTAssertTrue(playlistText.contains("#EXTM3U"))
+
+        // 2. Verify rewritten segments point to the LAN host, not hardcoded loopback
+        let lines = playlistText.components(separatedBy: "\n")
+        let segmentLine = try XCTUnwrap(
+            lines.first(where: { $0.hasPrefix("http://\(lanIP):\(port)") && $0.contains("/segment") }),
+            "Rewritten segment URL must point to http://\(lanIP):\(port)/segment"
+        )
+        let segmentURL = try XCTUnwrap(URL(string: segmentLine))
+
+        // 3. Fetch segment through LAN URL
+        let (segmentData, segmentResponse) = try await server.clientSession.data(from: segmentURL)
+        let segmentHTTP = try XCTUnwrap(segmentResponse as? HTTPURLResponse)
+        XCTAssertEqual(segmentHTTP.statusCode, 200)
+        XCTAssertGreaterThan(segmentData.count, 0, "Segment data must not be empty")
+        print("✅ testLANBoundLocalProxyServerFetch: fetched \(segmentData.count) bytes via \(lanIP):\(port)")
+    }
 }
 

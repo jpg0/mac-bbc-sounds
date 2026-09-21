@@ -213,15 +213,23 @@ class PlayerService: ObservableObject {
     }
 
     func skipToNextTrack() {
-        guard !currentTracks.isEmpty else { return }
+        guard !currentTracks.isEmpty else {
+            seek(by: 15)
+            return
+        }
         // Find the first track that starts after current time (+ small buffer)
         if let next = currentTracks.first(where: { Double($0.startTime) > currentTime + 2 }) {
             skipToTrack(next)
+        } else {
+            seek(by: 15)
         }
     }
 
     func skipToPreviousTrack() {
-        guard !currentTracks.isEmpty else { return }
+        guard !currentTracks.isEmpty else {
+            seek(by: -15)
+            return
+        }
         
         // Find the track we are currently in
         let sortedTracks = currentTracks.sorted { $0.startTime < $1.startTime }

@@ -177,9 +177,6 @@ struct ProgrammeRowView: View {
                         
                         Button {
                             isExpanded.toggle()
-                            if isExpanded {
-                                viewModel.loadEpisodes(for: programme.id)
-                            }
                         } label: {
                             Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                                 .font(.system(size: 13, weight: .semibold))
@@ -222,6 +219,16 @@ struct ProgrammeRowView: View {
                             .padding(.leading, 12)
                             .padding(.bottom, 6)
                         }
+                    }
+                }
+                .task(id: isExpanded) {
+                    if isExpanded && viewModel.brandEpisodes[programme.id] == nil {
+                        viewModel.loadEpisodes(for: programme.id)
+                    }
+                }
+                .onChange(of: viewModel.lastBookmarkRefreshDate) { _ in
+                    if isExpanded {
+                        viewModel.loadEpisodes(for: programme.id, force: true)
                     }
                 }
             }
