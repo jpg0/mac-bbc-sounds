@@ -6,11 +6,11 @@
 - 04: Sonos Volume Control and Position Synchronization
 - 05: LAN-Bound Smart Delivery Relay for Proxied Streams
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Add `@Published var outputTarget: AudioOutputTarget = .thisMac` to `PlayerService`.
-- [ ] Connect `PlayerService` to `SonosDiscoveryService` and instantiate/manage `SonosController` for the active Sonos target.
-- [ ] Route `play()`, `pause()`, `resume()`, `stop()`, `seek()`, and `setVolume()` based on the active `outputTarget`.
-- [ ] Implement seamless output handoff: switching target during playback transfers the current stream URL and elapsed time without losing state.
-- [ ] Ensure local Mac `AVPlayer` is silenced/paused when Sonos is active to prevent duplicate audio.
-- [ ] Write unit tests verifying that toggling `outputTarget` stops local playback, engages `SonosController`, and preserves playback time.
+- [x] Add `@Published var outputTarget: AudioOutputTarget = .thisMac` to `PlayerService`.
+- [x] Connect `PlayerService` to `SonosDiscoveryService` and instantiate/manage `SonosController` for the active Sonos target.
+- [x] Route `play()`, `pause()`, `resume()`, `stop()`, `seek()`, and `setVolume()` based on the active `outputTarget`.
+- [x] Implement seamless output handoff: switching target during playback transfers the current stream URL and elapsed time without losing state.
+- [x] Ensure local Mac `AVPlayer` is silenced/paused when Sonos is active to prevent duplicate audio.
+- [x] Write unit tests verifying that toggling `outputTarget` stops local playback, engages `SonosController`, and preserves playback time.

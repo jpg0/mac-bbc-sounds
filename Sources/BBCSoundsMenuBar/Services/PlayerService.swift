@@ -8,9 +8,24 @@ class PlayerService: ObservableObject {
     @Published var isPlaying = false
     @Published var volume: Float {
         didSet {
-            UserDefaults.app.set(volume, forKey: "PlayerVolume")
+            if outputTarget.isMac {
+                UserDefaults.app.set(volume, forKey: "PlayerVolume")
+            }
         }
     }
+    @Published var outputTarget: AudioOutputTarget = .thisMac {
+        didSet {
+            guard oldValue != outputTarget else { return }
+            handleOutputTargetChanged(from: oldValue, to: outputTarget)
+        }
+    }
+    @Published public private(set) var sonosController: SonosController? = nil
+    @Published public private(set) var currentStreamURL: URL? = nil
+
+    public let discoveryService: SonosDiscoveryService
+    var deliveryService = SonosStreamDeliveryService()
+    var sonosControllerFactory: ((SonosDevice) -> SonosController)?
+
     @Published var currentProgramme: Programme? = nil
     @Published var isLoading = false
     @Published var currentTime: Double = 0
@@ -32,9 +47,26 @@ class PlayerService: ObservableObject {
     private var lastSavedTime: Double = 0
     private var isUpdatingTracks = false
     private var currentLoadingArtworkURL: URL?
+    private var sonosCancellables = Set<AnyCancellable>()
+    private var discoveryCancellable: AnyCancellable?
+    private var handoffTask: Task<Void, Never>?
 
-    init() {
+    init(discoveryService: SonosDiscoveryService? = nil) {
         self.volume = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
+        let discovery = discoveryService ?? SonosDiscoveryService()
+        self.discoveryService = discovery
+        setupDiscoveryObservation()
+    }
+
+    private func setupDiscoveryObservation() {
+        discoveryCancellable = discoveryService.$discoveredDevices
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] devices in
+                guard let self = self, case .sonos(let activeDevice) = self.outputTarget else { return }
+                if let updated = devices.first(where: { $0.id == activeDevice.id }), updated != activeDevice {
+                    self.outputTarget = .sonos(updated)
+                }
+            }
     }
 
     private func logToDebugFile(_ msg: String) {
@@ -42,110 +74,170 @@ class PlayerService: ObservableObject {
     }
 
     func play(url: URL, programme: Programme) {
-        stop()
+        player?.pause()
+        player = nil
+        statusObserver = nil
+        durationObserver = nil
+        currentArtwork = nil
+        currentTracks = []
+        activeTrack = nil
+        trackUpdateTask?.cancel()
+        trackUpdateTask = nil
+        playerError = nil
+
+        self.currentStreamURL = url
+        self.currentProgramme = programme
+
+        switch outputTarget {
+        case .thisMac:
+            setupLocalPlayer(url: url, programme: programme, seekTo: nil, autoPlay: true)
+
+        case .sonos(let device):
+            let controller = sonosController ?? makeSonosController(for: device)
+            self.sonosController = controller
+            observeSonosController(controller)
+
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                do {
+                    try await self.startSonosPlayback(
+                        controller: controller,
+                        url: url,
+                        programme: programme,
+                        seekTo: nil,
+                        autoPlay: true
+                    )
+                } catch {
+                    self.logToDebugFile("❌ Failed to play to Sonos: \(error.localizedDescription)")
+                    self.playerError = error.localizedDescription
+                    self.isLoading = false
+                    self.isPlaying = false
+                }
+            }
+        }
+    }
+
+    private func setupLocalPlayer(
+        url: URL,
+        programme: Programme,
+        seekTo: Double? = nil,
+        autoPlay: Bool = true
+    ) {
+        player?.pause()
+        player = nil
+        statusObserver = nil
+        durationObserver = nil
         playerError = nil
 
         let item: AVPlayerItem
 
         if let proxy = proxyConfig {
-            // Proxy configured: route ALL streams (live and on-demand) through a local
-            // loopback server. This presents plain http:// URLs to AVPlayer, avoiding
-            // the CoreMediaErrorDomain -12881 error that blocks the bbcproxy:// path
-            // for live HLS segments, and also fixes on-demand streams via proxy.
-            let server = LocalProxyServer(proxyConfig: proxy)
-            do {
-                let port = try server.start()
-                self.localProxyServer = server
-
-                var comps = URLComponents()
-                comps.scheme = "http"
-                comps.host = "127.0.0.1"
-                comps.port = Int(port)
-                comps.path = "/playlist"
-                comps.queryItems = [URLQueryItem(name: "url", value: url.absoluteString)]
-
-                guard let localURL = comps.url else {
-                    logToDebugFile("❌ Could not build local proxy URL")
-                    server.stop()
-                    self.localProxyServer = nil
+            let server: LocalProxyServer
+            if let existing = localProxyServer, existing.isRunning {
+                server = existing
+            } else {
+                server = LocalProxyServer(proxyConfig: proxy)
+                do {
+                    _ = try server.start()
+                    self.localProxyServer = server
+                } catch {
+                    logToDebugFile("❌ LocalProxyServer failed to start: \(error.localizedDescription)")
+                    item = AVPlayerItem(url: url)
+                    setupAVPlayerWithItem(item, programme: programme, seekTo: seekTo, autoPlay: autoPlay)
                     return
                 }
+            }
 
+            if let localURL = server.relayURL(for: url) {
                 logToDebugFile("🔀 Stream routed via local proxy (\(programme.isLive ? "live" : "on-demand")): \(localURL)")
                 item = AVPlayerItem(url: localURL)
-            } catch {
-                logToDebugFile("❌ LocalProxyServer failed to start: \(error.localizedDescription)")
+            } else {
                 item = AVPlayerItem(url: url)
             }
         } else {
-            // No proxy: play directly — works fine for on-demand outside the UK
-            // and for users who don't need geo-unblocking.
             logToDebugFile("▶️ Playing directly (no proxy): \(url.absoluteString)")
             item = AVPlayerItem(url: url)
         }
 
-        
-        // Caching Requirements:
-        // For Live: Minimal buffer (AVPlayer handles this naturally for live playlists)
-        // For VOD: Buffer as much as possible (the entire show)
-        item.preferredForwardBufferDuration = 3600 * 3 // Try to buffer up to 3 hours
-        player = AVPlayer(playerItem: item)
-        player?.automaticallyWaitsToMinimizeStalling = true
-        player?.volume = volume
-        player?.play()
-        
-        isPlaying = true
+        setupAVPlayerWithItem(item, programme: programme, seekTo: seekTo, autoPlay: autoPlay)
+    }
+
+    private func setupAVPlayerWithItem(
+        _ item: AVPlayerItem,
+        programme: Programme,
+        seekTo: Double? = nil,
+        autoPlay: Bool = true
+    ) {
+        item.preferredForwardBufferDuration = 3600 * 3
+        let p = AVPlayer(playerItem: item)
+        p.automaticallyWaitsToMinimizeStalling = true
+        p.volume = volume
+        self.player = p
+
+        if let targetSeek = seekTo, targetSeek > 0, !programme.isLive {
+            p.seek(to: CMTime(seconds: targetSeek, preferredTimescale: 1))
+            self.currentTime = targetSeek
+        }
+
+        if autoPlay {
+            p.play()
+            isPlaying = true
+        } else {
+            isPlaying = false
+        }
+
         currentProgramme = programme
-        isLoading = true // Will be set to false when ready to play
+        isLoading = true
         updateNowPlaying()
         startTrackUpdates(for: programme)
-        
+
         // Observe time
-        player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
+        p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
             Task { @MainActor in
-                self?.currentTime = time.seconds
-                self?.updateNowPlayingTrack()
-                
-                // Save session every 5 seconds
-                if abs((self?.lastSavedTime ?? 0) - time.seconds) >= 5 {
-                    self?.saveSession()
+                guard let self = self, self.outputTarget.isMac else { return }
+                self.currentTime = time.seconds
+                self.updateNowPlayingTrack()
+                if abs(self.lastSavedTime - time.seconds) >= 5 {
+                    self.saveSession()
                 }
             }
         }
-        
+
         // Observe status and duration
         statusObserver = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
+                guard let self = self, self.outputTarget.isMac else { return }
                 if status == .readyToPlay {
-                    self?.logToDebugFile("Status: Ready to Play")
-                    self?.isLoading = false
-                    self?.updateDuration(item: item)
-                    self?.setupRemoteCommandCenter()
-                    self?.updateNowPlaying()
+                    self.logToDebugFile("Status: Ready to Play")
+                    self.isLoading = false
+                    self.updateDuration(item: item)
+                    self.setupRemoteCommandCenter()
+                    self.updateNowPlaying()
                 } else if status == .failed {
                     let errMsg = item.error?.localizedDescription ?? "Unknown failure"
-                    self?.logToDebugFile("Status: Failed - \(errMsg)")
-                    self?.playerError = errMsg
-                    self?.isLoading = false
+                    self.logToDebugFile("Status: Failed - \(errMsg)")
+                    self.playerError = errMsg
+                    self.isLoading = false
                 }
-                self?.logMediaError(for: item)
+                self.logMediaError(for: item)
             }
-        
+
         NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
             Task { @MainActor in
                 let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
                 self?.logToDebugFile("Playback Failed To Play To End: \(error?.localizedDescription ?? "Unknown")")
             }
         }
-            
+
         durationObserver = item.publisher(for: \.duration)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.updateDuration(item: item)
-                self?.updateNowPlaying()
+                guard let self = self, self.outputTarget.isMac else { return }
+                self.updateDuration(item: item)
+                self.updateNowPlaying()
             }
-        
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(didFinish),
@@ -154,25 +246,223 @@ class PlayerService: ObservableObject {
         )
     }
 
+    private func startSonosPlayback(
+        controller: SonosController,
+        url: URL,
+        programme: Programme,
+        seekTo: Double? = nil,
+        autoPlay: Bool = true
+    ) async throws {
+        isLoading = true
+        playerError = nil
+
+        let deliveryURL: URL
+        do {
+            if let proxy = proxyConfig {
+                let server = try deliveryService.prepareServer(proxyConfig: proxy, existingServer: localProxyServer)
+                self.localProxyServer = server
+                deliveryURL = try deliveryService.resolveDeliveryURL(for: url, proxyConfig: proxy, proxyServer: server)
+            } else {
+                deliveryURL = url
+            }
+        } catch {
+            logToDebugFile("❌ Failed to resolve delivery URL for Sonos: \(error.localizedDescription)")
+            playerError = error.localizedDescription
+            isLoading = false
+            throw error
+        }
+
+        logToDebugFile("📡 Setting Sonos transport URI: \(deliveryURL)")
+        try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
+
+        if let seekTime = seekTo, seekTime > 0, !programme.isLive {
+            logToDebugFile("⏩ Seeking Sonos to \(seekTime)s")
+            try await controller.seek(to: seekTime)
+            self.currentTime = seekTime
+        }
+
+        if autoPlay {
+            try await controller.play()
+            self.isPlaying = true
+        }
+
+        controller.startPolling()
+        isLoading = false
+        setupRemoteCommandCenter()
+        updateNowPlaying()
+        startTrackUpdates(for: programme)
+    }
+
+    private func teardownSonosController() async {
+        sonosController?.stopPolling()
+        let prevController = sonosController
+        sonosController = nil
+        sonosCancellables.removeAll()
+        _ = try? await prevController?.pause()
+    }
+
+    private var isPerformingProgrammaticHandoff = false
+
+    public func setOutputTarget(_ target: AudioOutputTarget) async throws {
+        guard target != outputTarget else { return }
+        let previous = outputTarget
+        isPerformingProgrammaticHandoff = true
+        self.outputTarget = target
+        isPerformingProgrammaticHandoff = false
+        try await performHandoff(from: previous, to: target)
+    }
+
+    private func handleOutputTargetChanged(from previous: AudioOutputTarget, to target: AudioOutputTarget) {
+        guard !isPerformingProgrammaticHandoff else { return }
+        handoffTask?.cancel()
+        handoffTask = Task { @MainActor [weak self] in
+            try? await self?.performHandoff(from: previous, to: target)
+        }
+    }
+
+    private func performHandoff(from previous: AudioOutputTarget, to target: AudioOutputTarget) async throws {
+        logToDebugFile("🔄 Output target changing from \(previous.displayName) to \(target.displayName)")
+
+        let wasPlaying = self.isPlaying
+        let handoffTime = self.currentTime
+        let prog = self.currentProgramme
+        let streamURL = self.currentStreamURL
+
+        switch target {
+        case .thisMac:
+            await teardownSonosController()
+
+            self.volume = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
+
+            if let streamURL = streamURL, let prog = prog {
+                setupLocalPlayer(url: streamURL, programme: prog, seekTo: handoffTime, autoPlay: wasPlaying)
+            }
+
+        case .sonos(let device):
+            if case .sonos(let prevDevice) = previous, prevDevice.id != device.id {
+                await teardownSonosController()
+            } else {
+                player?.pause()
+                player = nil
+                statusObserver = nil
+                durationObserver = nil
+            }
+
+            let controller = makeSonosController(for: device)
+            self.sonosController = controller
+            observeSonosController(controller)
+
+            if let initialVol = try? await controller.getVolume() {
+                self.volume = Float(initialVol) / 100.0
+            }
+
+            if let streamURL = streamURL, let prog = prog {
+                try await startSonosPlayback(
+                    controller: controller,
+                    url: streamURL,
+                    programme: prog,
+                    seekTo: handoffTime,
+                    autoPlay: wasPlaying
+                )
+            }
+        }
+    }
+
+    private func makeSonosController(for device: SonosDevice) -> SonosController {
+        if let factory = sonosControllerFactory {
+            return factory(device)
+        }
+        return SonosController(device: device)
+    }
+
+    private func observeSonosController(_ controller: SonosController) {
+        sonosCancellables.removeAll()
+
+        controller.$isPlaying
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isPlaying in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                if self.isPlaying != isPlaying {
+                    self.isPlaying = isPlaying
+                    self.updateNowPlaying()
+                }
+            }
+            .store(in: &sonosCancellables)
+
+        controller.$currentTime
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] time in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                self.currentTime = time
+                self.updateNowPlayingTrack()
+                if abs(self.lastSavedTime - time) >= 5 {
+                    self.saveSession()
+                }
+            }
+            .store(in: &sonosCancellables)
+
+        controller.$duration
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] dur in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                if dur > 0 {
+                    self.duration = dur
+                    self.updateNowPlaying()
+                }
+            }
+            .store(in: &sonosCancellables)
+
+        controller.$volume
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] vol in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                let normalized = Float(vol) / 100.0
+                if abs(self.volume - normalized) > 0.01 {
+                    self.volume = normalized
+                }
+            }
+            .store(in: &sonosCancellables)
+    }
+
     func pause() {
-        player?.pause()
+        switch outputTarget {
+        case .thisMac:
+            player?.pause()
+        case .sonos:
+            Task { try? await sonosController?.pause() }
+        }
         isPlaying = false
         updateNowPlaying()
         saveSession()
     }
 
     func resume() {
-        player?.play()
+        switch outputTarget {
+        case .thisMac:
+            player?.play()
+        case .sonos:
+            Task { try? await sonosController?.play() }
+        }
         isPlaying = true
         updateNowPlaying()
     }
     
     func seek(to seconds: Double) {
-        let time = CMTime(seconds: seconds, preferredTimescale: 1)
-        // Use default tolerances to avoid heavy frame-accurate CPU spikes unless needed
-        player?.seek(to: time) { [weak self] finished in
-            if finished {
-                Task { @MainActor in
+        switch outputTarget {
+        case .thisMac:
+            let time = CMTime(seconds: seconds, preferredTimescale: 1)
+            player?.seek(to: time) { [weak self] finished in
+                if finished {
+                    Task { @MainActor in
+                        self?.updateNowPlaying()
+                    }
+                }
+            }
+        case .sonos:
+            currentTime = seconds
+            Task { [weak self] in
+                try? await self?.sonosController?.seek(to: seconds)
+                await MainActor.run {
                     self?.updateNowPlaying()
                 }
             }
@@ -180,19 +470,34 @@ class PlayerService: ObservableObject {
     }
     
     func seek(by seconds: Double) {
-        guard let player = player else { return }
-        let currentSeconds = player.currentTime().seconds
-        seek(to: currentSeconds + seconds)
+        switch outputTarget {
+        case .thisMac:
+            guard let player = player else { return }
+            let currentSeconds = player.currentTime().seconds
+            seek(to: currentSeconds + seconds)
+        case .sonos:
+            seek(to: max(0, currentTime + seconds))
+        }
     }
 
     func stop() {
         saveSession()
-        player?.pause()
-        player = nil
+        switch outputTarget {
+        case .thisMac:
+            player?.pause()
+            player = nil
+        case .sonos:
+            sonosController?.stopPolling()
+            Task { [weak self] in
+                try? await self?.sonosController?.stop()
+            }
+        }
         isPlaying = false
         currentArtwork = nil
         currentTracks = []
         activeTrack = nil
+        currentStreamURL = nil
+        currentProgramme = nil
         trackUpdateTask?.cancel()
         trackUpdateTask = nil
         localProxyServer?.stop()
@@ -205,7 +510,15 @@ class PlayerService: ObservableObject {
 
     func setVolume(_ v: Float) {
         volume = v
-        player?.volume = v
+        switch outputTarget {
+        case .thisMac:
+            player?.volume = v
+        case .sonos:
+            let sonosVol = Int(round(v * 100))
+            Task { [weak self] in
+                try? await self?.sonosController?.setVolume(sonosVol)
+            }
+        }
     }
 
     func skipToTrack(_ segment: Segment) {
@@ -320,6 +633,7 @@ class PlayerService: ObservableObject {
     @objc private func didFinish() {
         isPlaying = false
         currentProgramme = nil
+        currentStreamURL = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
     
