@@ -1,0 +1,535 @@
+import Foundation
+import Network
+
+/// In-process mock Sonos UPnP/DLNA HTTP & SOAP device for unit and integration testing.
+/// Runs on 127.0.0.1 on an ephemeral port.
+final class MockSonosDevice {
+
+    // MARK: - Properties
+
+    let roomName: String
+    let udn: String
+    let modelName: String
+
+    private let lock = NSLock()
+    private var _transportState: String
+    private var _currentVolume: Int
+    private var _trackDuration: String
+    private var _trackRelTime: String
+    private var _receivedURI: String?
+    private var _receivedDIDLLite: String?
+    private var _receivedActions: [String] = []
+
+    var transportState: String {
+        get { lock.withLock { _transportState } }
+        set { lock.withLock { _transportState = newValue } }
+    }
+
+    var currentVolume: Int {
+        get { lock.withLock { _currentVolume } }
+        set { lock.withLock { _currentVolume = newValue } }
+    }
+
+    var trackDuration: String {
+        get { lock.withLock { _trackDuration } }
+        set { lock.withLock { _trackDuration = newValue } }
+    }
+
+    var trackRelTime: String {
+        get { lock.withLock { _trackRelTime } }
+        set { lock.withLock { _trackRelTime = newValue } }
+    }
+
+    var receivedURI: String? {
+        get { lock.withLock { _receivedURI } }
+        set { lock.withLock { _receivedURI = newValue } }
+    }
+
+    var receivedDIDLLite: String? {
+        get { lock.withLock { _receivedDIDLLite } }
+        set { lock.withLock { _receivedDIDLLite = newValue } }
+    }
+
+    var receivedActions: [String] {
+        get { lock.withLock { _receivedActions } }
+    }
+
+    // MARK: - Networking
+
+    private(set) var port: UInt16 = 0
+    private var listener: NWListener?
+    private let queue = DispatchQueue(label: "com.trillica.MockSonosDevice", qos: .userInitiated)
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
+
+    var baseURL: URL? {
+        guard port > 0 else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)")
+    }
+
+    // MARK: - Init
+
+    init(
+        roomName: String = "Living Room",
+        udn: String = "uuid:RINCON_000E5800000001400",
+        modelName: String = "Sonos One",
+        transportState: String = "STOPPED",
+        currentVolume: Int = 25,
+        trackDuration: String = "01:00:00",
+        trackRelTime: String = "00:05:00"
+    ) {
+        self.roomName = roomName
+        self.udn = udn
+        self.modelName = modelName
+        self._transportState = transportState
+        self._currentVolume = currentVolume
+        self._trackDuration = trackDuration
+        self._trackRelTime = trackRelTime
+    }
+
+    // MARK: - Lifecycle
+
+    @discardableResult
+    func start() throws -> UInt16 {
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
+
+        let l = try NWListener(using: params, on: .any)
+        self.listener = l
+
+        let readyGroup = DispatchGroup()
+        readyGroup.enter()
+
+        l.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                self?.port = l.port?.rawValue ?? 0
+                readyGroup.leave()
+            case .failed(let err):
+                print("⚠️ [MockSonosDevice] Listener failed: \(err)")
+                readyGroup.leave()
+            default:
+                break
+            }
+        }
+
+        l.newConnectionHandler = { [weak self] conn in
+            self?.handleConnection(conn)
+        }
+
+        l.start(queue: queue)
+        readyGroup.wait()
+
+        guard port > 0 else {
+            throw NSError(domain: "MockSonosDevice", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to bind MockSonosDevice listener"])
+        }
+
+        return port
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+
+        lock.withLock {
+            for conn in activeConnections.values {
+                conn.cancel()
+            }
+            activeConnections.removeAll()
+        }
+    }
+
+    // MARK: - Connection Handling
+
+    private func handleConnection(_ conn: NWConnection) {
+        let connId = ObjectIdentifier(conn)
+        lock.withLock {
+            activeConnections[connId] = conn
+        }
+
+        conn.stateUpdateHandler = { [weak self, weak conn] state in
+            switch state {
+            case .cancelled, .failed:
+                if let conn {
+                    let id = ObjectIdentifier(conn)
+                    self?.lock.withLock {
+                        _ = self?.activeConnections.removeValue(forKey: id)
+                    }
+                }
+            default:
+                break
+            }
+        }
+
+        conn.start(queue: queue)
+        receiveData(on: conn, accumulated: Data())
+    }
+
+    private func receiveData(on conn: NWConnection, accumulated: Data) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, err in
+            guard let self else { return }
+            guard err == nil, let data else {
+                conn.cancel()
+                return
+            }
+
+            var fullData = accumulated
+            fullData.append(data)
+
+            // Check if we received full HTTP request headers
+            if let separatorRange = fullData.range(of: Data("\r\n\r\n".utf8)) {
+                let headerData = fullData.subdata(in: 0..<separatorRange.lowerBound)
+                let bodyData = fullData.subdata(in: separatorRange.upperBound..<fullData.count)
+
+                if let headerText = String(data: headerData, encoding: .utf8) {
+                    let contentLength = self.parseContentLength(headerText)
+                    if bodyData.count >= contentLength {
+                        self.processRequest(headerText: headerText, bodyData: bodyData, conn: conn)
+                        return
+                    }
+                }
+            }
+
+            if isComplete {
+                if let headerText = String(data: fullData, encoding: .utf8) {
+                    self.processRequest(headerText: headerText, bodyData: Data(), conn: conn)
+                } else {
+                    conn.cancel()
+                }
+            } else {
+                self.receiveData(on: conn, accumulated: fullData)
+            }
+        }
+    }
+
+    private func parseContentLength(_ headerText: String) -> Int {
+        for line in headerText.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-length:") {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                if parts.count == 2, let len = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    return len
+                }
+            }
+        }
+        return 0
+    }
+
+    private func processRequest(headerText: String, bodyData: Data, conn: NWConnection) {
+        let lines = headerText.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else {
+            send(conn: conn, code: 400, body: Data("Bad Request".utf8))
+            return
+        }
+
+        let parts = requestLine.split(separator: " ", maxSplits: 2)
+        guard parts.count >= 2 else {
+            send(conn: conn, code: 400, body: Data("Bad Request".utf8))
+            return
+        }
+
+        let method = String(parts[0])
+        let path = String(parts[1])
+
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            let hp = line.split(separator: ":", maxSplits: 1)
+            if hp.count == 2 {
+                headers[hp[0].trimmingCharacters(in: .whitespaces).lowercased()] = hp[1].trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        let bodyText = String(data: bodyData, encoding: .utf8) ?? ""
+
+        // Route by path
+        if method == "GET" && path == "/xml/device_description.xml" {
+            let xml = makeDeviceDescriptionXML()
+            send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(xml.utf8))
+            return
+        }
+
+        if method == "GET" && path == "/status/topology" {
+            let xml = makeTopologyXML()
+            send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(xml.utf8))
+            return
+        }
+
+        if method == "POST" && path == "/MediaRenderer/AVTransport/Control" {
+            let action = resolveSOAPAction(headers: headers, bodyText: bodyText)
+            recordAction(action)
+            let responseXML = handleAVTransportAction(action: action, bodyText: bodyText)
+            send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(responseXML.utf8))
+            return
+        }
+
+        if method == "POST" && path == "/MediaRenderer/RenderingControl/Control" {
+            let action = resolveSOAPAction(headers: headers, bodyText: bodyText)
+            recordAction(action)
+            let responseXML = handleRenderingControlAction(action: action, bodyText: bodyText)
+            send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(responseXML.utf8))
+            return
+        }
+
+        send(conn: conn, code: 404, body: Data("Not Found".utf8))
+    }
+
+    private func recordAction(_ action: String) {
+        lock.withLock {
+            _receivedActions.append(action)
+        }
+    }
+
+    private func resolveSOAPAction(headers: [String: String], bodyText: String) -> String {
+        if let soapHeader = headers["soapaction"] {
+            let trimmed = soapHeader.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            if let hashIdx = trimmed.lastIndex(of: "#") {
+                return String(trimmed[trimmed.index(after: hashIdx)...])
+            }
+            return trimmed
+        }
+
+        // Fallback: search for tag <u:ActionName
+        if let match = bodyText.range(of: "<u:[A-Za-z0-9]+", options: .regularExpression) {
+            let tag = bodyText[match]
+            return String(tag.dropFirst(3))
+        }
+        return "Unknown"
+    }
+
+    // MARK: - SOAP Handlers
+
+    private func handleAVTransportAction(action: String, bodyText: String) -> String {
+        switch action {
+        case "SetAVTransportURI":
+            let uri = extractTag(name: "CurrentURI", from: bodyText)
+            let rawMeta = extractTag(name: "CurrentURIMetaData", from: bodyText)
+            let unescapedMeta = rawMeta?
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .replacingOccurrences(of: "&amp;", with: "&")
+
+            lock.withLock {
+                _receivedURI = uri
+                _receivedDIDLLite = unescapedMeta
+            }
+
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetAVTransportURIResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "Play":
+            lock.withLock { _transportState = "PLAYING" }
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:PlayResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "Pause":
+            lock.withLock { _transportState = "PAUSED_PLAYBACK" }
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:PauseResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "Stop":
+            lock.withLock { _transportState = "STOPPED" }
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:StopResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "Seek":
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SeekResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "GetTransportInfo":
+            let state = transportState
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                  <CurrentTransportState>\(state)</CurrentTransportState>
+                  <CurrentTransportStatus>OK</CurrentTransportStatus>
+                  <CurrentSpeed>1</CurrentSpeed>
+                </u:GetTransportInfoResponse>
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "GetPositionInfo":
+            let dur = trackDuration
+            let rel = trackRelTime
+            let curURI = receivedURI ?? ""
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                  <Track>1</Track>
+                  <TrackDuration>\(dur)</TrackDuration>
+                  <TrackMetaData></TrackMetaData>
+                  <TrackURI>\(curURI)</TrackURI>
+                  <RelTime>\(rel)</RelTime>
+                  <AbsTime>\(rel)</AbsTime>
+                  <RelCount>2147483647</RelCount>
+                  <AbsCount>2147483647</AbsCount>
+                </u:GetPositionInfoResponse>
+              </s:Body>
+            </s:Envelope>
+            """
+
+        default:
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:\(action)Response xmlns:u="urn:schemas-upnp-org:service:AVTransport:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+        }
+    }
+
+    private func handleRenderingControlAction(action: String, bodyText: String) -> String {
+        switch action {
+        case "SetVolume":
+            if let volStr = extractTag(name: "DesiredVolume", from: bodyText), let vol = Int(volStr) {
+                currentVolume = vol
+            }
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+
+        case "GetVolume":
+            let vol = currentVolume
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/envelope/">
+              <s:Body>
+                <u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+                  <CurrentVolume>\(vol)</CurrentVolume>
+                </u:GetVolumeResponse>
+              </s:Body>
+            </s:Envelope>
+            """
+
+        default:
+            return """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:\(action)Response xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1" />
+              </s:Body>
+            </s:Envelope>
+            """
+        }
+    }
+
+    private func extractTag(name: String, from xml: String) -> String? {
+        let pattern = "<\(name)>(.*?)</\(name)>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: xml, options: [], range: NSRange(location: 0, length: xml.utf16.count)),
+              let range = Range(match.range(at: 1), in: xml) else {
+            return nil
+        }
+        return String(xml[range])
+    }
+
+    // MARK: - XML Generators
+
+    private func makeDeviceDescriptionXML() -> String {
+        return """
+        <?xml version="1.0" encoding="utf-8"?>
+        <root xmlns="urn:schemas-upnp-org:device-1-0">
+          <specVersion>
+            <major>1</major>
+            <minor>0</minor>
+          </specVersion>
+          <device>
+            <deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</deviceType>
+            <friendlyName>\(roomName)</friendlyName>
+            <roomName>\(roomName)</roomName>
+            <displayName>\(roomName)</displayName>
+            <UDN>\(udn)</UDN>
+            <modelName>\(modelName)</modelName>
+            <serviceList>
+              <service>
+                <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+                <controlURL>/MediaRenderer/AVTransport/Control</controlURL>
+                <eventSubURL>/MediaRenderer/AVTransport/Event</eventSubURL>
+              </service>
+              <service>
+                <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+                <controlURL>/MediaRenderer/RenderingControl/Control</controlURL>
+                <eventSubURL>/MediaRenderer/RenderingControl/Event</eventSubURL>
+              </service>
+            </serviceList>
+          </device>
+        </root>
+        """
+    }
+
+    private func makeTopologyXML() -> String {
+        let rawUUID = udn.replacingOccurrences(of: "uuid:", with: "")
+        return """
+        <ZoneGroups>
+          <ZoneGroup Coordinator="\(rawUUID)" ID="\(rawUUID):1">
+            <ZoneGroupMember UUID="\(rawUUID)" Location="http://127.0.0.1:\(port)/xml/device_description.xml" ZoneName="\(roomName)" ChannelMapSet="" IsZoneBridge="0"/>
+          </ZoneGroup>
+        </ZoneGroups>
+        """
+    }
+
+    // MARK: - HTTP Response
+
+    private func send(conn: NWConnection, code: Int, contentType: String = "text/plain", body: Data) {
+        let phrase: String
+        switch code {
+        case 200: phrase = "OK"
+        case 400: phrase = "Bad Request"
+        case 404: phrase = "Not Found"
+        case 405: phrase = "Method Not Allowed"
+        case 500: phrase = "Internal Server Error"
+        default: phrase = "Unknown"
+        }
+
+        var header = "HTTP/1.1 \(code) \(phrase)\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Content-Length: \(body.count)\r\n"
+        header += "Connection: close\r\n\r\n"
+
+        var packet = Data(header.utf8)
+        packet.append(body)
+
+        conn.send(content: packet, completion: .contentProcessed { [weak self, weak conn] _ in
+            conn?.cancel()
+            if let conn {
+                let id = ObjectIdentifier(conn)
+                self?.lock.withLock {
+                    _ = self?.activeConnections.removeValue(forKey: id)
+                }
+            }
+        })
+    }
+}
