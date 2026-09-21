@@ -1,6 +1,7 @@
 import XCTest
 @testable import BBCSoundsMenuBar
 
+@MainActor
 final class SonosControllerTests: XCTestCase {
 
     // MARK: - Seam 1: SonosMetadata & DIDL-Lite Generation
@@ -276,6 +277,272 @@ final class SonosControllerTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    // MARK: - Seam 3: XML Parsers for RenderingControl & AVTransport
+
+    func testSonosVolumeParserSuccess() throws {
+        let xml = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+          <s:Body>
+            <u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              <CurrentVolume>35</CurrentVolume>
+            </u:GetVolumeResponse>
+          </s:Body>
+        </s:Envelope>
+        """
+        let volume = try SonosVolumeParser.parse(xmlData: Data(xml.utf8))
+        XCTAssertEqual(volume, 35)
+    }
+
+    func testSonosTransportInfoParserStates() throws {
+        let xmlPlaying = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+          <s:Body>
+            <u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+              <CurrentTransportState>PLAYING</CurrentTransportState>
+              <CurrentTransportStatus>OK</CurrentTransportStatus>
+              <CurrentSpeed>1</CurrentSpeed>
+            </u:GetTransportInfoResponse>
+          </s:Body>
+        </s:Envelope>
+        """
+        let playingInfo = try SonosTransportInfoParser.parse(xmlData: Data(xmlPlaying.utf8))
+        XCTAssertEqual(playingInfo.state, .playing)
+        XCTAssertEqual(playingInfo.status, "OK")
+        XCTAssertEqual(playingInfo.speed, "1")
+
+        let xmlPaused = """
+        <s:Envelope><s:Body><u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+          <CurrentTransportState>PAUSED_PLAYBACK</CurrentTransportState>
+        </u:GetTransportInfoResponse></s:Body></s:Envelope>
+        """
+        let pausedInfo = try SonosTransportInfoParser.parse(xmlData: Data(xmlPaused.utf8))
+        XCTAssertEqual(pausedInfo.state, .paused)
+
+        let xmlStopped = """
+        <s:Envelope><s:Body><u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+          <CurrentTransportState>STOPPED</CurrentTransportState>
+        </u:GetTransportInfoResponse></s:Body></s:Envelope>
+        """
+        let stoppedInfo = try SonosTransportInfoParser.parse(xmlData: Data(xmlStopped.utf8))
+        XCTAssertEqual(stoppedInfo.state, .stopped)
+    }
+
+    func testSonosPositionInfoParserValuesAndTimeIntervalCalculation() throws {
+        let xml = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+          <s:Body>
+            <u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+              <Track>1</Track>
+              <TrackDuration>01:30:15</TrackDuration>
+              <TrackMetaData></TrackMetaData>
+              <TrackURI>http://example.com/audio.m3u8</TrackURI>
+              <RelTime>00:15:30</RelTime>
+              <AbsTime>00:15:30</AbsTime>
+              <RelCount>2147483647</RelCount>
+              <AbsCount>2147483647</AbsCount>
+            </u:GetPositionInfoResponse>
+          </s:Body>
+        </s:Envelope>
+        """
+        let position = try SonosPositionInfoParser.parse(xmlData: Data(xml.utf8))
+        XCTAssertEqual(position.rawTrackDuration, "01:30:15")
+        XCTAssertEqual(position.rawRelTime, "00:15:30")
+        XCTAssertEqual(position.trackURI, "http://example.com/audio.m3u8")
+        XCTAssertEqual(position.trackDuration, 5415.0) // 1h 30m 15s
+        XCTAssertEqual(position.trackRelTime, 930.0) // 15m 30s
+    }
+
+    func testSonosPositionInfoTimeIntervalFormattingAndParsingEdgeCases() {
+        XCTAssertEqual(SonosPositionInfo.parseTimeInterval("00:00:00"), 0)
+        XCTAssertEqual(SonosPositionInfo.parseTimeInterval("NOT_IMPLEMENTED"), 0)
+        XCTAssertEqual(SonosPositionInfo.parseTimeInterval(""), 0)
+        XCTAssertEqual(SonosPositionInfo.parseTimeInterval("00:01:30.500"), 90.5)
+
+        XCTAssertEqual(SonosPositionInfo.formatTimeInterval(0), "00:00:00")
+        XCTAssertEqual(SonosPositionInfo.formatTimeInterval(90), "00:01:30")
+        XCTAssertEqual(SonosPositionInfo.formatTimeInterval(3665), "01:01:05")
+    }
+
+    // MARK: - Seam 4: Volume & Position Controls against MockSonosDevice
+
+    @MainActor
+    func testSonosControllerVolumeControlOnMockDevice() async throws {
+        let mock = MockSonosDevice(roomName: "Dining Room", currentVolume: 20)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_DINING",
+            name: "Dining Room",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        // 1. Initial getVolume
+        let initialVol = try await controller.getVolume()
+        XCTAssertEqual(initialVol, 20)
+        XCTAssertEqual(controller.volume, 20)
+
+        // 2. setVolume to 65
+        try await controller.setVolume(65)
+        XCTAssertEqual(mock.currentVolume, 65)
+        XCTAssertEqual(controller.volume, 65)
+
+        // 3. Confirm getVolume returns updated value
+        let fetchedVol = try await controller.getVolume()
+        XCTAssertEqual(fetchedVol, 65)
+        XCTAssertTrue(mock.receivedActions.contains("SetVolume"))
+        XCTAssertTrue(mock.receivedActions.contains("GetVolume"))
+    }
+
+    @MainActor
+    func testSonosControllerVolumeClamping() async throws {
+        let mock = MockSonosDevice(roomName: "Den", currentVolume: 10)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_DEN",
+            name: "Den",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        // Clamp negative volume to 0
+        try await controller.setVolume(-15)
+        XCTAssertEqual(mock.currentVolume, 0)
+        XCTAssertEqual(controller.volume, 0)
+
+        // Clamp over 100 to 100
+        try await controller.setVolume(150)
+        XCTAssertEqual(mock.currentVolume, 100)
+        XCTAssertEqual(controller.volume, 100)
+    }
+
+    @MainActor
+    func testSonosControllerTransportInfoAndPositionOnMockDevice() async throws {
+        let mock = MockSonosDevice(
+            roomName: "Living Room",
+            transportState: "PAUSED_PLAYBACK",
+            trackDuration: "00:45:00",
+            trackRelTime: "00:10:00"
+        )
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_LIVING",
+            name: "Living Room",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        // Transport Info
+        let transport = try await controller.getTransportInfo()
+        XCTAssertEqual(transport.state, .paused)
+        XCTAssertEqual(controller.transportState, .paused)
+        XCTAssertFalse(controller.isPlaying)
+
+        // Position Info
+        let position = try await controller.getPositionInfo()
+        XCTAssertEqual(position.rawTrackDuration, "00:45:00")
+        XCTAssertEqual(position.rawRelTime, "00:10:00")
+        XCTAssertEqual(position.trackDuration, 2700.0)
+        XCTAssertEqual(position.trackRelTime, 600.0)
+        XCTAssertEqual(controller.duration, 2700.0)
+        XCTAssertEqual(controller.currentTime, 600.0)
+    }
+
+    @MainActor
+    func testSonosControllerSeekOnMockDevice() async throws {
+        let mock = MockSonosDevice(
+            roomName: "Kitchen",
+            trackDuration: "01:00:00",
+            trackRelTime: "00:00:00"
+        )
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_KITCHEN",
+            name: "Kitchen",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        // Seek to 12 minutes (720 seconds)
+        try await controller.seek(to: 720)
+        XCTAssertEqual(controller.currentTime, 720)
+        XCTAssertEqual(mock.trackRelTime, "00:12:00")
+
+        let seekBodies = mock.receivedActionBodies.filter { $0.action == "Seek" }
+        XCTAssertEqual(seekBodies.count, 1)
+        XCTAssertTrue(seekBodies[0].body.contains("<Unit>REL_TIME</Unit>"))
+        XCTAssertTrue(seekBodies[0].body.contains("<Target>00:12:00</Target>"))
+    }
+
+    @MainActor
+    func testSonosControllerBackgroundPollingPublishesUpdates() async throws {
+        let mock = MockSonosDevice(
+            roomName: "Balcony",
+            transportState: "STOPPED",
+            currentVolume: 10,
+            trackDuration: "00:30:00",
+            trackRelTime: "00:01:00"
+        )
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_BALCONY",
+            name: "Balcony",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+        XCTAssertFalse(controller.isPolling)
+
+        // Start fast polling interval for test
+        controller.startPolling(interval: 0.05)
+        XCTAssertTrue(controller.isPolling)
+
+        // Allow initial poll cycle to complete
+        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        XCTAssertEqual(controller.volume, 10)
+        XCTAssertEqual(controller.transportState, .stopped)
+        XCTAssertEqual(controller.currentTime, 60.0)
+
+        // Simulate changes from another controller / physical speaker buttons
+        mock.currentVolume = 50
+        mock.transportState = "PLAYING"
+        mock.trackRelTime = "00:05:00"
+
+        // Wait for next polling cycle
+        try await Task.sleep(nanoseconds: 120_000_000) // 120ms
+        XCTAssertEqual(controller.volume, 50)
+        XCTAssertEqual(controller.transportState, .playing)
+        XCTAssertTrue(controller.isPlaying)
+        XCTAssertEqual(controller.currentTime, 300.0)
+
+        // Stop polling
+        controller.stopPolling()
+        XCTAssertFalse(controller.isPolling)
     }
 }
 

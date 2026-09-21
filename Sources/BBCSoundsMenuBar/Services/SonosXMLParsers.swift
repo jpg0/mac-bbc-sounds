@@ -231,3 +231,145 @@ private final class TopologyXMLDelegate: NSObject, XMLParserDelegate {
         }
     }
 }
+
+// MARK: - RenderingControl Volume Parser
+
+public enum SonosVolumeParser {
+    public static func parse(xmlData: Data) throws -> Int {
+        let delegate = VolumeXMLDelegate()
+        let parser = XMLParser(data: xmlData)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+
+        guard parser.parse() else {
+            throw parser.parserError ?? SonosXMLError.invalidXML
+        }
+
+        guard let volume = delegate.volume else {
+            throw SonosXMLError.missingRequiredField("CurrentVolume")
+        }
+
+        return volume
+    }
+}
+
+private final class VolumeXMLDelegate: NSObject, XMLParserDelegate {
+    var volume: Int?
+    private var currentText: String = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
+        currentText = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if elementName.hasSuffix("CurrentVolume") {
+            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+            volume = Int(trimmed)
+        }
+    }
+}
+
+// MARK: - AVTransport TransportInfo Parser
+
+public enum SonosTransportInfoParser {
+    public static func parse(xmlData: Data) throws -> SonosTransportInfo {
+        let delegate = TransportInfoXMLDelegate()
+        let parser = XMLParser(data: xmlData)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+
+        guard parser.parse() else {
+            throw parser.parserError ?? SonosXMLError.invalidXML
+        }
+
+        let state = SonosTransportState(fromRaw: delegate.state ?? "UNKNOWN")
+        let status = delegate.status ?? "OK"
+        let speed = delegate.speed ?? "1"
+
+        return SonosTransportInfo(state: state, status: status, speed: speed)
+    }
+}
+
+private final class TransportInfoXMLDelegate: NSObject, XMLParserDelegate {
+    var state: String?
+    var status: String?
+    var speed: String?
+    private var currentText: String = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
+        currentText = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if elementName.hasSuffix("CurrentTransportState") {
+            state = trimmed
+        } else if elementName.hasSuffix("CurrentTransportStatus") {
+            status = trimmed
+        } else if elementName.hasSuffix("CurrentSpeed") {
+            speed = trimmed
+        }
+    }
+}
+
+// MARK: - AVTransport PositionInfo Parser
+
+public enum SonosPositionInfoParser {
+    public static func parse(xmlData: Data) throws -> SonosPositionInfo {
+        let delegate = PositionInfoXMLDelegate()
+        let parser = XMLParser(data: xmlData)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+
+        guard parser.parse() else {
+            throw parser.parserError ?? SonosXMLError.invalidXML
+        }
+
+        let duration = delegate.trackDuration ?? "00:00:00"
+        let relTime = delegate.relTime ?? "00:00:00"
+
+        return SonosPositionInfo(
+            rawTrackDuration: duration,
+            rawRelTime: relTime,
+            trackURI: delegate.trackURI
+        )
+    }
+}
+
+private final class PositionInfoXMLDelegate: NSObject, XMLParserDelegate {
+    var trackDuration: String?
+    var relTime: String?
+    var trackURI: String?
+    private var currentText: String = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
+        currentText = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if elementName.hasSuffix("TrackDuration") {
+            trackDuration = trimmed
+        } else if elementName.hasSuffix("RelTime") {
+            relTime = trimmed
+        } else if elementName.hasSuffix("TrackURI") {
+            trackURI = trimmed.isEmpty ? nil : trimmed
+        }
+    }
+}
+

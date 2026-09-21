@@ -21,9 +21,10 @@ public enum SonosError: LocalizedError, Equatable {
     }
 }
 
-/// Controller responsible for sending UPnP AVTransport commands to a Sonos device or group.
-/// Transport commands are always directed to the group coordinator.
-public final class SonosController: Sendable {
+/// Controller responsible for sending UPnP AVTransport and RenderingControl commands
+/// to a Sonos device or group, and synchronizing volume and playback position.
+@MainActor
+public final class SonosController: ObservableObject {
 
     // MARK: - Properties
 
@@ -33,11 +34,45 @@ public final class SonosController: Sendable {
     /// URLSession used for SOAP HTTP requests
     public let session: URLSession
 
-    // MARK: - Init
+    // MARK: - Published State
+
+    /// Current speaker volume (scale 0-100)
+    @Published public private(set) var volume: Int = 0
+
+    /// Transport info representing state, status, and speed
+    @Published public private(set) var transportInfo: SonosTransportInfo = SonosTransportInfo()
+
+    /// Current transport state (PLAYING, PAUSED_PLAYBACK, STOPPED, etc.)
+    @Published public private(set) var transportState: SonosTransportState = .stopped
+
+    /// Convenience flag whether playback is currently playing
+    @Published public private(set) var isPlaying: Bool = false
+
+    /// Playback position information (track duration, elapsed time, track URI)
+    @Published public private(set) var positionInfo: SonosPositionInfo = .zero
+
+    /// Current playback elapsed time in seconds
+    @Published public private(set) var currentTime: TimeInterval = 0
+
+    /// Total track duration in seconds
+    @Published public private(set) var duration: TimeInterval = 0
+
+    /// Whether the background state polling task is active
+    @Published public private(set) var isPolling: Bool = false
+
+    // MARK: - Private Polling State
+
+    private var pollingTask: Task<Void, Never>?
+
+    // MARK: - Init & Deinit
 
     public init(device: SonosDevice, session: URLSession = .shared) {
         self.device = device
         self.session = session
+    }
+
+    deinit {
+        pollingTask?.cancel()
     }
 
     // MARK: - Endpoints
@@ -45,6 +80,80 @@ public final class SonosController: Sendable {
     /// AVTransport control endpoint URL on the group coordinator.
     public var avTransportEndpoint: URL? {
         device.avTransportControlURL
+    }
+
+    /// RenderingControl control endpoint URL on this speaker.
+    public var renderingControlEndpoint: URL? {
+        device.renderingControlURL
+    }
+
+    // MARK: - RenderingControl Actions
+
+    /// Retrieves current speaker volume (scale 0-100) via RenderingControl SOAP action.
+    @discardableResult
+    public func getVolume() async throws -> Int {
+        guard let endpoint = renderingControlEndpoint else {
+            throw SonosError.invalidEndpoint
+        }
+
+        let actionBody = """
+          <InstanceID>0</InstanceID>
+          <Channel>Master</Channel>
+        """
+
+        let soapBody = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              \(actionBody)
+            </u:GetVolume>
+          </s:Body>
+        </s:Envelope>
+        """
+
+        let data = try await sendSOAP(
+            endpoint: endpoint,
+            service: "RenderingControl:1",
+            action: "GetVolume",
+            body: soapBody
+        )
+
+        let vol = try SonosVolumeParser.parse(xmlData: data)
+        self.volume = vol
+        return vol
+    }
+
+    /// Sets speaker volume (scale 0-100) via RenderingControl SOAP action.
+    public func setVolume(_ newVolume: Int) async throws {
+        guard let endpoint = renderingControlEndpoint else {
+            throw SonosError.invalidEndpoint
+        }
+
+        let clamped = max(0, min(100, newVolume))
+        let actionBody = """
+          <InstanceID>0</InstanceID>
+          <Channel>Master</Channel>
+          <DesiredVolume>\(clamped)</DesiredVolume>
+        """
+
+        let soapBody = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              \(actionBody)
+            </u:SetVolume>
+          </s:Body>
+        </s:Envelope>
+        """
+
+        _ = try await sendSOAP(
+            endpoint: endpoint,
+            service: "RenderingControl:1",
+            action: "SetVolume",
+            body: soapBody
+        )
+
+        self.volume = clamped
     }
 
     // MARK: - AVTransport Actions
@@ -70,16 +179,98 @@ public final class SonosController: Sendable {
     /// Sends the `Play` command to the target Sonos speaker.
     public func play() async throws {
         _ = try await sendAVTransportAction("Play", actionBody: "<Speed>1</Speed>")
+        self.transportState = .playing
+        self.isPlaying = true
     }
 
     /// Sends the `Pause` command to the target Sonos speaker.
     public func pause() async throws {
         _ = try await sendAVTransportAction("Pause")
+        self.transportState = .paused
+        self.isPlaying = false
     }
 
     /// Sends the `Stop` command to the target Sonos speaker.
     public func stop() async throws {
         _ = try await sendAVTransportAction("Stop")
+        self.transportState = .stopped
+        self.isPlaying = false
+    }
+
+    /// Fetches the current transport status and playback state via GetTransportInfo.
+    @discardableResult
+    public func getTransportInfo() async throws -> SonosTransportInfo {
+        let data = try await sendAVTransportAction("GetTransportInfo")
+        let info = try SonosTransportInfoParser.parse(xmlData: data)
+        self.transportInfo = info
+        self.transportState = info.state
+        self.isPlaying = (info.state == .playing)
+        return info
+    }
+
+    /// Fetches track duration and relative elapsed time via GetPositionInfo.
+    @discardableResult
+    public func getPositionInfo() async throws -> SonosPositionInfo {
+        let data = try await sendAVTransportAction("GetPositionInfo")
+        let info = try SonosPositionInfoParser.parse(xmlData: data)
+        self.positionInfo = info
+        self.currentTime = info.trackRelTime
+        self.duration = info.trackDuration
+        return info
+    }
+
+    /// Seeks to a specific timestamp in seconds (converts to REL_TIME format HH:MM:SS).
+    public func seek(to seconds: TimeInterval) async throws {
+        let formatted = SonosPositionInfo.formatTimeInterval(seconds)
+        try await seek(target: formatted)
+        self.currentTime = seconds
+    }
+
+    /// Seeks using a raw UPnP target timestamp (e.g. "00:15:30").
+    public func seek(target: String) async throws {
+        let actionBody = """
+          <Unit>REL_TIME</Unit>
+          <Target>\(target)</Target>
+        """
+        _ = try await sendAVTransportAction("Seek", actionBody: actionBody)
+    }
+
+    // MARK: - State Polling
+
+    /// Starts periodic background polling of volume, transport info, and position info.
+    public func startPolling(interval: TimeInterval = 1.5) {
+        stopPolling()
+        isPolling = true
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollState()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+            }
+        }
+    }
+
+    /// Stops periodic background polling.
+    public func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
+        isPolling = false
+    }
+
+    /// Polls volume, transport info, and position info from the speaker once, ignoring individual transient errors.
+    public func pollState() async {
+        if let vol = try? await getVolume() {
+            self.volume = vol
+        }
+        if let tInfo = try? await getTransportInfo() {
+            self.transportInfo = tInfo
+            self.transportState = tInfo.state
+            self.isPlaying = (tInfo.state == .playing)
+        }
+        if let pInfo = try? await getPositionInfo() {
+            self.positionInfo = pInfo
+            self.currentTime = pInfo.trackRelTime
+            self.duration = pInfo.trackDuration
+        }
     }
 
     // MARK: - SOAP Dispatch Helpers

@@ -357,6 +357,9 @@ final class MockSonosDevice {
             return soapEnvelope(body: "<u:StopResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "Seek":
+            if let target = extractTag(name: "Target", from: bodyText) {
+                lock.withLock { _trackRelTime = target }
+            }
             return soapEnvelope(body: "<u:SeekResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\" />")
 
         case "GetTransportInfo":
