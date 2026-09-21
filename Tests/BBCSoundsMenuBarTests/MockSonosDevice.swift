@@ -19,6 +19,12 @@ final class MockSonosDevice {
     private var _receivedURI: String?
     private var _receivedDIDLLite: String?
     private var _receivedActions: [String] = []
+    private var _customTopologyXML: String?
+
+    var customTopologyXML: String? {
+        get { lock.withLock { _customTopologyXML } }
+        set { lock.withLock { _customTopologyXML = newValue } }
+    }
 
     var transportState: String {
         get { lock.withLock { _transportState } }
@@ -446,6 +452,9 @@ final class MockSonosDevice {
     }
 
     private func makeTopologyXML() -> String {
+        if let custom = customTopologyXML {
+            return custom
+        }
         let rawUUID = udn.replacingOccurrences(of: "uuid:", with: "")
         return """
         <ZoneGroups>

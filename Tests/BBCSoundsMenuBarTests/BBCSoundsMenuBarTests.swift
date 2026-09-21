@@ -430,5 +430,149 @@ final class BBCSoundsMenuBarTests: XCTestCase {
         XCTAssertGreaterThan(segmentData.count, 0, "On-demand segment data must not be empty")
         print("✅ testOnDemandStreamViaLocalProxyServer: fetched \(segmentData.count) bytes from on-demand segment")
     }
+
+    // MARK: - Unit Tests: Sonos Device Description & Topology Parsers
+
+    func testSonosDeviceDescriptionParser() throws {
+        let sampleXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <root xmlns="urn:schemas-upnp-org:device-1-0">
+          <device>
+            <deviceType>urn:schemas-upnp-org:device:ZonePlayer:1</deviceType>
+            <friendlyName>Living Room</friendlyName>
+            <roomName>Living Room</roomName>
+            <displayName>Living Room</displayName>
+            <UDN>uuid:RINCON_000E5800000001400</UDN>
+            <modelName>Sonos One</modelName>
+          </device>
+        </root>
+        """
+
+        let parsed = try SonosDeviceDescriptionParser.parse(xmlData: Data(sampleXML.utf8))
+        XCTAssertEqual(parsed.roomName, "Living Room")
+        XCTAssertEqual(parsed.displayName, "Living Room")
+        XCTAssertEqual(parsed.udn, "uuid:RINCON_000E5800000001400")
+        XCTAssertEqual(parsed.modelName, "Sonos One")
+    }
+
+    func testSonosTopologyParserSingleAndMultiRoom() throws {
+        let multiRoomXML = """
+        <ZoneGroups>
+          <ZoneGroup Coordinator="RINCON_000E5800000001400" ID="RINCON_000E5800000001400:1">
+            <ZoneGroupMember UUID="RINCON_000E5800000001400" Location="http://192.168.1.100:1400/xml/device_description.xml" ZoneName="Living Room" ChannelMapSet="" IsZoneBridge="0"/>
+            <ZoneGroupMember UUID="RINCON_000E5800000101400" Location="http://192.168.1.101:1400/xml/device_description.xml" ZoneName="Kitchen" ChannelMapSet="" IsZoneBridge="0"/>
+            <ZoneGroupMember UUID="RINCON_000E5800000901400" Location="http://192.168.1.109:1400/xml/device_description.xml" ZoneName="Boost" ChannelMapSet="" IsZoneBridge="1"/>
+          </ZoneGroup>
+          <ZoneGroup Coordinator="RINCON_000E5800000201400" ID="RINCON_000E5800000201400:2">
+            <ZoneGroupMember UUID="RINCON_000E5800000201400" Location="http://192.168.1.102:1400/xml/device_description.xml" ZoneName="Bedroom" ChannelMapSet="" IsZoneBridge="0"/>
+          </ZoneGroup>
+        </ZoneGroups>
+        """
+
+        let groups = try SonosTopologyParser.parse(xmlData: Data(multiRoomXML.utf8))
+        XCTAssertEqual(groups.count, 2)
+
+        // Group 1: Living Room + Kitchen
+        let group1 = groups[0]
+        XCTAssertEqual(group1.coordinatorUUID, "RINCON_000E5800000001400")
+        XCTAssertEqual(group1.groupName, "Living Room + Kitchen")
+        XCTAssertEqual(group1.audioMembers.count, 2)
+        XCTAssertEqual(group1.coordinatorMember?.zoneName, "Living Room")
+
+        // Group 2: Bedroom (single)
+        let group2 = groups[1]
+        XCTAssertEqual(group2.coordinatorUUID, "RINCON_000E5800000201400")
+        XCTAssertEqual(group2.groupName, "Bedroom")
+        XCTAssertEqual(group2.audioMembers.count, 1)
+    }
+
+    // MARK: - Integration Tests: Sonos Discovery Service with Mock Sonos Device
+
+    @MainActor
+    func testSonosDiscoveryServiceWithMockDevice() async throws {
+        let mock = MockSonosDevice(roomName: "Living Room", udn: "uuid:RINCON_000E5800000001400", modelName: "Sonos One")
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        guard let locationURL = URL(string: "http://127.0.0.1:\(port)/xml/device_description.xml") else {
+            XCTFail("Invalid mock location URL")
+            return
+        }
+
+        let discoveryService = SonosDiscoveryService()
+        await discoveryService.processDiscoveredLocation(locationURL)
+
+        XCTAssertFalse(discoveryService.discoveredDevices.isEmpty, "Should have discovered mock Sonos device")
+        let device = try XCTUnwrap(discoveryService.discoveredDevices.first)
+        XCTAssertEqual(device.name, "Living Room")
+        XCTAssertEqual(device.displayName, "Living Room")
+        XCTAssertEqual(device.ipAddress, "127.0.0.1")
+        XCTAssertEqual(device.port, port)
+        XCTAssertTrue(device.isCoordinator)
+        XCTAssertEqual(device.modelName, "Sonos One")
+    }
+
+    @MainActor
+    func testSonosDiscoveryServiceMultiRoomGroupWithMockDevice() async throws {
+        let mock = MockSonosDevice(roomName: "Living Room", udn: "uuid:RINCON_000E5800000001400", modelName: "Sonos One")
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        // Configure custom multi-room topology where Living Room is grouped with Kitchen
+        mock.customTopologyXML = """
+        <ZoneGroups>
+          <ZoneGroup Coordinator="RINCON_000E5800000001400" ID="RINCON_000E5800000001400:1">
+            <ZoneGroupMember UUID="RINCON_000E5800000001400" Location="http://127.0.0.1:\(port)/xml/device_description.xml" ZoneName="Living Room" ChannelMapSet="" IsZoneBridge="0"/>
+            <ZoneGroupMember UUID="RINCON_000E5800000101400" Location="http://127.0.0.1:\(port)/xml/device_description.xml" ZoneName="Kitchen" ChannelMapSet="" IsZoneBridge="0"/>
+          </ZoneGroup>
+        </ZoneGroups>
+        """
+
+        guard let locationURL = URL(string: "http://127.0.0.1:\(port)/xml/device_description.xml") else {
+            XCTFail("Invalid mock location URL")
+            return
+        }
+
+        let discoveryService = SonosDiscoveryService()
+        await discoveryService.processDiscoveredLocation(locationURL)
+
+        XCTAssertEqual(discoveryService.discoveredDevices.count, 1)
+        let coordinator = try XCTUnwrap(discoveryService.discoveredDevices.first)
+        XCTAssertEqual(coordinator.name, "Living Room")
+        XCTAssertEqual(coordinator.groupName, "Living Room + Kitchen")
+        XCTAssertEqual(coordinator.displayName, "Living Room + Kitchen")
+        XCTAssertTrue(coordinator.isCoordinator)
+        XCTAssertEqual(coordinator.ipAddress, "127.0.0.1")
+        XCTAssertEqual(coordinator.port, port)
+
+        // allZoneDevices contains both rooms
+        XCTAssertEqual(discoveryService.allZoneDevices.count, 2)
+        let kitchen = try XCTUnwrap(discoveryService.allZoneDevices.first(where: { $0.name == "Kitchen" }))
+        XCTAssertFalse(kitchen.isCoordinator)
+        XCTAssertEqual(kitchen.coordinatorIP, "127.0.0.1")
+        XCTAssertEqual(kitchen.coordinatorPort, port)
+    }
+
+    @MainActor
+    func testSonosDiscoveryServicePruningExpiredDevices() async throws {
+        let mock = MockSonosDevice(roomName: "Living Room", udn: "uuid:RINCON_000E5800000001400", modelName: "Sonos One")
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        guard let locationURL = URL(string: "http://127.0.0.1:\(port)/xml/device_description.xml") else {
+            XCTFail("Invalid mock location URL")
+            return
+        }
+
+        let discoveryService = SonosDiscoveryService()
+        await discoveryService.processDiscoveredLocation(locationURL)
+        XCTAssertEqual(discoveryService.discoveredDevices.count, 1)
+
+        // Pruning with olderThan: 0 prunes any device seen before now
+        try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+        discoveryService.pruneStaleDevices(olderThan: 0.005)
+
+        XCTAssertTrue(discoveryService.discoveredDevices.isEmpty, "Device should be pruned after exceeding TTL")
+    }
 }
 
