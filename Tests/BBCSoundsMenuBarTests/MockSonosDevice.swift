@@ -60,6 +60,12 @@ final class MockSonosDevice {
         get { lock.withLock { _receivedActions } }
     }
 
+    var receivedActionBodies: [(action: String, body: String)] {
+        get { lock.withLock { _receivedActionBodies } }
+    }
+
+    private var _receivedActionBodies: [(action: String, body: String)] = []
+
     // MARK: - Networking
 
     private(set) var port: UInt16 = 0
@@ -262,7 +268,7 @@ final class MockSonosDevice {
 
         if method == "POST" && path == "/MediaRenderer/AVTransport/Control" {
             let action = resolveSOAPAction(headers: headers, bodyText: bodyText)
-            recordAction(action)
+            recordAction(action, body: bodyText)
             let responseXML = handleAVTransportAction(action: action, bodyText: bodyText)
             send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(responseXML.utf8))
             return
@@ -270,7 +276,7 @@ final class MockSonosDevice {
 
         if method == "POST" && path == "/MediaRenderer/RenderingControl/Control" {
             let action = resolveSOAPAction(headers: headers, bodyText: bodyText)
-            recordAction(action)
+            recordAction(action, body: bodyText)
             let responseXML = handleRenderingControlAction(action: action, bodyText: bodyText)
             send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(responseXML.utf8))
             return
@@ -279,9 +285,10 @@ final class MockSonosDevice {
         send(conn: conn, code: 404, body: Data("Not Found".utf8))
     }
 
-    private func recordAction(_ action: String) {
+    private func recordAction(_ action: String, body: String = "") {
         lock.withLock {
             _receivedActions.append(action)
+            _receivedActionBodies.append((action: action, body: body))
         }
     }
 

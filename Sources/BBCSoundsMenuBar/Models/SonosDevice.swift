@@ -79,4 +79,18 @@ public struct SonosDevice: Identifiable, Hashable, Equatable, Sendable {
         }
         return baseURL
     }
+
+    /// Control URL for the AVTransport service on the group coordinator
+    public var avTransportControlURL: URL? {
+        guard let base = coordinatorBaseURL else { return nil }
+        let baseStr = base.absoluteString.hasSuffix("/") ? String(base.absoluteString.dropLast()) : base.absoluteString
+        return URL(string: "\(baseStr)/MediaRenderer/AVTransport/Control")
+    }
+
+    /// Control URL for the RenderingControl service on this individual speaker
+    public var renderingControlURL: URL? {
+        guard let base = baseURL else { return nil }
+        let baseStr = base.absoluteString.hasSuffix("/") ? String(base.absoluteString.dropLast()) : base.absoluteString
+        return URL(string: "\(baseStr)/MediaRenderer/RenderingControl/Control")
+    }
 }

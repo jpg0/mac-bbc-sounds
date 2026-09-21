@@ -4,10 +4,10 @@
 
 **Blocked by:** 02: Sonos SSDP Discovery and Group Topology
 
-**Status:** ready-for-agent
+**Status:** closed
 
-- [ ] Implement `SonosController` targeting a specific `SonosDevice` (using its coordinator endpoint).
-- [ ] Implement `SetAVTransportURI` SOAP action sending stream URL and XML-escaped DIDL-Lite metadata.
-- [ ] Format DIDL-Lite XML with `<dc:title>` (programme name), `<dc:creator>` (channel/station), and `<upnp:albumArtURI>` (artwork URL).
-- [ ] Implement `Play`, `Pause`, and `Stop` SOAP actions on `AVTransport`.
-- [ ] Write unit tests verifying that invoking playback commands on `SonosController` delivers the expected SOAP envelopes and DIDL-Lite metadata to `MockSonosDevice`.
+- [x] Implement `SonosController` targeting a specific `SonosDevice` (using its coordinator endpoint).
+- [x] Implement `SetAVTransportURI` SOAP action sending stream URL and XML-escaped DIDL-Lite metadata.
+- [x] Format DIDL-Lite XML with `<dc:title>` (programme name), `<dc:creator>` (channel/station), and `<upnp:albumArtURI>` (artwork URL).
+- [x] Implement `Play`, `Pause`, and `Stop` SOAP actions on `AVTransport`.
+- [x] Write unit tests verifying that invoking playback commands on `SonosController` delivers the expected SOAP envelopes and DIDL-Lite metadata to `MockSonosDevice`.
