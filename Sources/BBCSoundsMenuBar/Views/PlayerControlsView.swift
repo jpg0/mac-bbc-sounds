@@ -3,6 +3,7 @@ import SwiftUI
 struct PlayerControlsView: View {
     @ObservedObject var player: PlayerService
     @Environment(\.colorScheme) var colorScheme
+    @State private var showingSpeakerPicker = false
 
     private var nowPlayingTrack: Segment? {
         player.currentTracks.first(where: { $0.isNowPlaying })
@@ -50,6 +51,23 @@ struct PlayerControlsView: View {
                         Text(programme.channel)
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        // Sonos Output Status Indicator
+                        if case .sonos(let device) = player.outputTarget {
+                            HStack(spacing: 4) {
+                                Image(systemName: "hifispeaker.fill")
+                                    .font(.system(size: 9))
+                                Text(player.isPlaying ? "Playing to \(device.displayName)" : (player.isLoading ? "Connecting to \(device.displayName)..." : "Connected to \(device.displayName)"))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.12))
+                            .cornerRadius(4)
+                            .padding(.top, 1)
+                        }
                         
                         if let track = nowPlayingTrack {
                             HStack(spacing: 4) {
@@ -66,12 +84,28 @@ struct PlayerControlsView: View {
                         Text("Loading...")
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundColor(.secondary)
+
+                        if case .sonos(let device) = player.outputTarget {
+                            HStack(spacing: 4) {
+                                Image(systemName: "hifispeaker.fill")
+                                    .font(.system(size: 9))
+                                Text("Connecting to \(device.displayName)...")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.12))
+                            .cornerRadius(4)
+                            .padding(.top, 1)
+                        }
                     }
                 }
                 
                 Spacer()
                 
-                // Tracklist Toggle & Stop Button
+                // Tracklist Toggle, Speaker Picker & Stop Button
                 HStack(spacing: 12) {
                     if let track = nowPlayingTrack {
                         Button {
@@ -85,6 +119,19 @@ struct PlayerControlsView: View {
                         .help("Search on Spotify")
                     }
 
+                    // Speaker Route Button
+                    Button {
+                        showingSpeakerPicker.toggle()
+                    } label: {
+                        Image(systemName: player.outputTarget.isSonos ? "hifispeaker.2.fill" : "airplayaudio")
+                            .font(.system(size: 15))
+                            .foregroundColor(player.outputTarget.isSonos ? .blue : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(player.outputTarget.isSonos ? "Streaming to \(player.outputTarget.displayName)" : "Audio Output")
+                    .popover(isPresented: $showingSpeakerPicker, arrowEdge: .bottom) {
+                        SpeakerPickerPopover(player: player)
+                    }
 
                     Button {
                         player.stop()

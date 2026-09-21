@@ -69,6 +69,24 @@ class PlayerService: ObservableObject {
             }
     }
 
+    /// Starts periodic SSDP discovery for Sonos speakers.
+    public func startDiscovery() {
+        discoveryService.startDiscovery()
+    }
+
+    /// Triggers an immediate SSDP search for Sonos speakers.
+    public func scanForDevices() {
+        discoveryService.scan()
+    }
+
+    /// Fetches the volume level for a Sonos device, returning the live volume if currently active.
+    public func fetchVolume(for device: SonosDevice) async -> Int? {
+        if case .sonos(let active) = outputTarget, active.id == device.id {
+            return Int(round(volume * 100))
+        }
+        return try? await makeSonosController(for: device).getVolume()
+    }
+
     private func logToDebugFile(_ msg: String) {
         print("🔊 [PlayerService] \(msg)")
     }

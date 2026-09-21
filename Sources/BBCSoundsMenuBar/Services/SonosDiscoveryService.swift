@@ -158,6 +158,10 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
             let coordinatorModel = knownDescriptions[coordUUID]?.modelName ??
                 (coordUUID == currentDesc?.udn.normalizedSonosUUID ? currentDesc?.modelName : nil)
 
+            let otherMemberNames = group.audioMembers
+                .filter { $0.normalizedUUID != coordUUID }
+                .map { $0.zoneName }
+
             let coordinatorDevice = SonosDevice(
                 id: coordinator.uuid,
                 name: coordinator.zoneName,
@@ -169,7 +173,8 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
                 groupName: groupDisplayName,
                 coordinatorUUID: coordUUID,
                 coordinatorIP: coordHost,
-                coordinatorPort: coordPort
+                coordinatorPort: coordPort,
+                memberNames: otherMemberNames
             )
             newCoordinators.append(coordinatorDevice)
             deviceLastSeen[coordinatorDevice.id] = now

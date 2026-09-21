@@ -35,6 +35,9 @@ public struct SonosDevice: Identifiable, Hashable, Equatable, Sendable {
     /// Port of the coordinator (typically 1400)
     public let coordinatorPort: UInt16?
 
+    /// Names of other zone members in the group (excluding coordinator)
+    public let memberNames: [String]
+
     public init(
         id: String,
         name: String,
@@ -46,7 +49,8 @@ public struct SonosDevice: Identifiable, Hashable, Equatable, Sendable {
         groupName: String? = nil,
         coordinatorUUID: String? = nil,
         coordinatorIP: String? = nil,
-        coordinatorPort: UInt16? = nil
+        coordinatorPort: UInt16? = nil,
+        memberNames: [String] = []
     ) {
         self.id = id.normalizedSonosUUID
         self.name = name
@@ -60,11 +64,23 @@ public struct SonosDevice: Identifiable, Hashable, Equatable, Sendable {
         self.coordinatorUUID = normCoordUUID
         self.coordinatorIP = coordinatorIP ?? (isCoordinator ? ipAddress : nil)
         self.coordinatorPort = coordinatorPort ?? (isCoordinator ? port : nil)
+        self.memberNames = memberNames
     }
 
     /// Display title: uses combined group name if available, otherwise room name
     public var displayName: String {
         groupName ?? name
+    }
+
+    /// Formatted group badge text if device is part of a multi-speaker group, e.g. "(+ Kitchen)"
+    public var groupBadge: String? {
+        if !memberNames.isEmpty {
+            return "(+ \(memberNames.joined(separator: ", ")))"
+        }
+        guard let groupName = groupName, groupName != name else { return nil }
+        let members = groupName.components(separatedBy: " + ").filter { $0 != name }
+        guard !members.isEmpty else { return nil }
+        return "(+ \(members.joined(separator: ", ")))"
     }
 
     /// Base URL for this individual speaker's HTTP/UPnP endpoints

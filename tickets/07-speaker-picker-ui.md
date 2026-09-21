@@ -4,11 +4,11 @@
 
 **Blocked by:** 06: PlayerService Output Target Routing and Handoff
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Create `SpeakerPickerPopover` SwiftUI view presenting "This Mac" and the list of discovered Sonos rooms from `SonosDiscoveryService`.
-- [ ] Display checkmark for active output target, speaker volume level, and group composition badges (e.g. "Living Room (+ Kitchen)").
-- [ ] Add a refresh/re-scan button to trigger an immediate SSDP search.
-- [ ] Add a speaker route button (e.g. `airplayaudio` or `hifispeaker.2`) to `PlayerControlsView` in the header action buttons.
-- [ ] Add a visual status indicator in `PlayerControlsView` when Sonos is active (e.g. displaying the Sonos room name).
-- [ ] Manually verify UI interactions: selecting a room switches the route, updates checkmark, and reflects current volume.
+- [x] Create `SpeakerPickerPopover` SwiftUI view presenting "This Mac" and the list of discovered Sonos rooms from `SonosDiscoveryService`.
+- [x] Display checkmark for active output target, speaker volume level, and group composition badges (e.g. "Living Room (+ Kitchen)").
+- [x] Add a refresh/re-scan button to trigger an immediate SSDP search.
+- [x] Add a speaker route button (e.g. `airplayaudio` or `hifispeaker.2`) to `PlayerControlsView` in the header action buttons.
+- [x] Add a visual status indicator in `PlayerControlsView` when Sonos is active (e.g. displaying the Sonos room name).
+- [x] Manually verify UI interactions: selecting a room switches the route, updates checkmark, and reflects current volume.

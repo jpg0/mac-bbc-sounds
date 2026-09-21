@@ -68,6 +68,7 @@ class AppViewModel: ObservableObject {
         let sounds = BBCSoundsService()
         self.bbcSounds = sounds
         pService.bbcSounds = sounds
+        pService.startDiscovery()
         
         // Observe player state
         player.$playerError
