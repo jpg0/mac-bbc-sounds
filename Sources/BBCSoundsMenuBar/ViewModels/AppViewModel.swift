@@ -277,8 +277,9 @@ class AppViewModel: ObservableObject {
         do {
             var updatedProgramme = programme
             
-            // Resolve the actual stream URL and the Episode/Version PID
-            let (url, resolvedPID) = try await bbcSounds.resolveStream(pid: programme.id)
+            // Prioritize the already resolved Version PID (VPID) if available (e.g. from a saved session)
+            let knownVPID = programme.resolvedPID
+            let (url, resolvedPID) = try await bbcSounds.resolveStream(pid: programme.id, knownVPID: knownVPID)
             updatedProgramme.resolvedPID = resolvedPID
             
             // Fetch metadata to get the duration if not already present
@@ -299,7 +300,15 @@ class AppViewModel: ObservableObject {
                 }
             }
         } catch {
-            errorMessage = "Could not load stream: \(error.localizedDescription)"
+            if case BBCSoundsError.programmeExpiredOrNotFound = error {
+                errorMessage = "This programme is no longer available on BBC Sounds (expired or 404)."
+                dismissResume()
+            } else if error.localizedDescription.contains("404") {
+                errorMessage = "This programme is no longer available on BBC Sounds (expired or 404)."
+                dismissResume()
+            } else {
+                errorMessage = "Could not load stream: \(error.localizedDescription)"
+            }
         }
         isLoadingStream = false
     }

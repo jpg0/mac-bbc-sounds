@@ -79,6 +79,11 @@ class PlayerService: ObservableObject {
         discoveryService.scan()
     }
 
+    /// Manually adds and probes a known Sonos speaker host/IP (useful across VLANs/subnets).
+    public func addKnownSonosHost(_ host: String) {
+        discoveryService.addKnownHost(host)
+    }
+
     /// Fetches the volume level for a Sonos device, returning the live volume if currently active.
     public func fetchVolume(for device: SonosDevice) async -> Int? {
         if case .sonos(let active) = outputTarget, active.id == device.id {
@@ -273,6 +278,9 @@ class PlayerService: ObservableObject {
     ) async throws {
         isLoading = true
         playerError = nil
+        defer {
+            isLoading = false
+        }
 
         let deliveryURL: URL
         do {
@@ -286,29 +294,38 @@ class PlayerService: ObservableObject {
         } catch {
             logToDebugFile("❌ Failed to resolve delivery URL for Sonos: \(error.localizedDescription)")
             playerError = error.localizedDescription
-            isLoading = false
             throw error
         }
 
         logToDebugFile("📡 Setting Sonos transport URI: \(deliveryURL)")
-        try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
+        do {
+            try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
 
-        if let seekTime = seekTo, seekTime > 0, !programme.isLive {
-            logToDebugFile("⏩ Seeking Sonos to \(seekTime)s")
-            try await controller.seek(to: seekTime)
-            self.currentTime = seekTime
+            if let seekTime = seekTo, seekTime > 0, !programme.isLive {
+                do {
+                    logToDebugFile("⏩ Seeking Sonos to \(seekTime)s")
+                    try await controller.seek(to: seekTime)
+                    self.currentTime = seekTime
+                } catch {
+                    logToDebugFile("⚠️ Seek not supported for this stream on Sonos: \(error.localizedDescription)")
+                }
+            }
+
+            if autoPlay {
+                try await controller.play()
+                self.isPlaying = true
+            }
+
+            controller.startPolling()
+            setupRemoteCommandCenter()
+            updateNowPlaying()
+            startTrackUpdates(for: programme)
+        } catch {
+            logToDebugFile("❌ Sonos playback error: \(error.localizedDescription)")
+            playerError = error.localizedDescription
+            isPlaying = false
+            throw error
         }
-
-        if autoPlay {
-            try await controller.play()
-            self.isPlaying = true
-        }
-
-        controller.startPolling()
-        isLoading = false
-        setupRemoteCommandCenter()
-        updateNowPlaying()
-        startTrackUpdates(for: programme)
     }
 
     private func teardownSonosController() async {
@@ -327,14 +344,28 @@ class PlayerService: ObservableObject {
         isPerformingProgrammaticHandoff = true
         self.outputTarget = target
         isPerformingProgrammaticHandoff = false
-        try await performHandoff(from: previous, to: target)
+        do {
+            try await performHandoff(from: previous, to: target)
+        } catch {
+            self.playerError = error.localizedDescription
+            self.isLoading = false
+            self.isPlaying = false
+            throw error
+        }
     }
 
     private func handleOutputTargetChanged(from previous: AudioOutputTarget, to target: AudioOutputTarget) {
         guard !isPerformingProgrammaticHandoff else { return }
         handoffTask?.cancel()
         handoffTask = Task { @MainActor [weak self] in
-            try? await self?.performHandoff(from: previous, to: target)
+            do {
+                try await self?.performHandoff(from: previous, to: target)
+            } catch {
+                self?.logToDebugFile("❌ Handoff failed: \(error.localizedDescription)")
+                self?.playerError = error.localizedDescription
+                self?.isLoading = false
+                self?.isPlaying = false
+            }
         }
     }
 
@@ -375,13 +406,21 @@ class PlayerService: ObservableObject {
             }
 
             if let streamURL = streamURL, let prog = prog {
-                try await startSonosPlayback(
-                    controller: controller,
-                    url: streamURL,
-                    programme: prog,
-                    seekTo: handoffTime,
-                    autoPlay: wasPlaying
-                )
+                do {
+                    try await startSonosPlayback(
+                        controller: controller,
+                        url: streamURL,
+                        programme: prog,
+                        seekTo: handoffTime,
+                        autoPlay: wasPlaying
+                    )
+                } catch {
+                    logToDebugFile("❌ Failed to handoff to Sonos: \(error.localizedDescription)")
+                    self.playerError = error.localizedDescription
+                    self.isLoading = false
+                    self.isPlaying = false
+                    throw error
+                }
             }
         }
     }

@@ -9,15 +9,11 @@ let package = Package(
     products: [
         .executable(name: "BBCSoundsMenuBar", targets: ["BBCSoundsMenuBar"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/pierrickrouxel/SSDPClient.git", from: "1.0.0")
-    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "BBCSoundsMenuBar",
-            dependencies: [
-                .product(name: "SSDPClient", package: "SSDPClient")
-            ],
+            dependencies: [],
             path: "Sources/BBCSoundsMenuBar"
         ),
         .testTarget(

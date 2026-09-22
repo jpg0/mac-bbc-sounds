@@ -7,6 +7,7 @@ enum BBCSoundsError: LocalizedError {
     case noVPIDFound
     case noStreamFound
     case apiError(String)
+    case programmeExpiredOrNotFound
     
     var errorDescription: String? {
         switch self {
@@ -14,6 +15,7 @@ enum BBCSoundsError: LocalizedError {
         case .noVPIDFound: return "Could not find a playable version for this programme."
         case .noStreamFound: return "No streaming URL found for this programme."
         case .apiError(let msg): return "BBC API error: \(msg)"
+        case .programmeExpiredOrNotFound: return "This programme is no longer available on BBC Sounds (expired or not found)."
         }
     }
 }
@@ -225,12 +227,18 @@ actor BBCSoundsService {
         return programme
     }
     
-    func getStreamURL(pid: String) async throws -> URL {
-        logToDebugFile("Getting Stream URL for PID: \(pid)")
+    func getStreamURL(pid: String, knownVPID: String? = nil) async throws -> URL {
+        logToDebugFile("Getting Stream URL for PID: \(pid), knownVPID: \(knownVPID ?? "nil")")
         
-        // Step 1: Get VPID from programme metadata
-        let vpid = try await fetchVPID(pid: pid)
-        logToDebugFile("Resolved VPID: \(vpid)")
+        // Step 1: Get VPID from programme metadata or use known VPID
+        let vpid: String
+        if let known = knownVPID, !known.isEmpty {
+            vpid = known
+            logToDebugFile("Using known VPID: \(vpid)")
+        } else {
+            vpid = try await fetchVPID(pid: pid)
+            logToDebugFile("Resolved VPID: \(vpid)")
+        }
         
         // Directly resolve Akamai HLS live streams if mapped
         if let pool = BBCSoundsService.liveStationPools[vpid] {
@@ -247,6 +255,7 @@ actor BBCSoundsService {
         // Step 2: Query Media Selector with fallbacks
         let mediasets = ["pc", "iptv-all", "mobile-cellular-main"]
         var lastError: Error?
+        var had404 = false
         
         for mediaset in mediasets {
             let urlString = "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/\(mediaset)/vpid/\(vpid)/format/json"
@@ -278,17 +287,28 @@ actor BBCSoundsService {
                 logToDebugFile("No HLS stream in \(mediaset) response.")
             } catch {
                 logToDebugFile("❌ Mediaset \(mediaset) failed: \(error.localizedDescription)")
+                if case BBCSoundsError.apiError(let msg) = error, msg.contains("404") {
+                    had404 = true
+                }
                 lastError = error
             }
         }
         
+        if had404 {
+            throw BBCSoundsError.programmeExpiredOrNotFound
+        }
         throw lastError ?? BBCSoundsError.noStreamFound
     }
     
     // Returns both the URL and the actual Episode/Version PID resolved
-    func resolveStream(pid: String) async throws -> (URL, String) {
-        let vpid = try await fetchVPID(pid: pid)
-        let url = try await getStreamURL(pid: pid)
+    func resolveStream(pid: String, knownVPID: String? = nil) async throws -> (URL, String) {
+        let vpid: String
+        if let known = knownVPID, !known.isEmpty {
+            vpid = known
+        } else {
+            vpid = try await fetchVPID(pid: pid)
+        }
+        let url = try await getStreamURL(pid: pid, knownVPID: vpid)
         return (url, vpid)
     }
     

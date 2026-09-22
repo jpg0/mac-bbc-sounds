@@ -64,14 +64,19 @@ struct SonosStreamDeliveryService: Sendable {
         return relayURL
     }
 
+    /// Default fixed LAN port for Sonos streaming so firewall rules can target a stable port.
+    public static let defaultPort: UInt16 = LocalProxyServer.defaultFixedPort
+
     /// Prepares or restarts a `LocalProxyServer` bound to all interfaces (`0.0.0.0`) for Sonos streaming.
     /// - Parameters:
     ///   - proxyConfig: The active proxy configuration.
     ///   - existingServer: An optional currently active server instance.
+    ///   - preferredPort: Optional port to bind to (defaults to defaultPort 52800).
     /// - Returns: A running `LocalProxyServer` bound to all interfaces.
     func prepareServer(
         proxyConfig: ProxyConfiguration,
-        existingServer: LocalProxyServer? = nil
+        existingServer: LocalProxyServer? = nil,
+        preferredPort: UInt16? = defaultPort
     ) throws -> LocalProxyServer {
         if let existing = existingServer, existing.isRunning, existing.bindAddress == .any {
             return existing
@@ -79,7 +84,12 @@ struct SonosStreamDeliveryService: Sendable {
 
         existingServer?.stop()
         let lanIP = getLANIP()
-        let server = LocalProxyServer(proxyConfig: proxyConfig, bindAddress: .any, advertisedHost: lanIP)
+        let server = LocalProxyServer(
+            proxyConfig: proxyConfig,
+            bindAddress: .any,
+            advertisedHost: lanIP,
+            preferredPort: preferredPort
+        )
         try server.start()
         return server
     }

@@ -172,8 +172,26 @@ public struct SonosZoneGroup: Equatable, Sendable {
 
 public enum SonosTopologyParser {
     public static func parse(xmlData: Data) throws -> [SonosZoneGroup] {
+        var dataToParse = xmlData
+
+        // If response is a UPnP SOAP Envelope with <ZoneGroupState> XML string
+        if let str = String(data: xmlData, encoding: .utf8),
+           let start = str.range(of: "<ZoneGroupState>"),
+           let end = str.range(of: "</ZoneGroupState>") {
+            let inner = String(str[start.upperBound..<end.lowerBound])
+            let decoded = inner
+                .replacingOccurrences(of: "&lt;", with: "<")
+                .replacingOccurrences(of: "&gt;", with: ">")
+                .replacingOccurrences(of: "&quot;", with: "\"")
+                .replacingOccurrences(of: "&apos;", with: "'")
+                .replacingOccurrences(of: "&amp;", with: "&")
+            if let innerData = decoded.data(using: .utf8) {
+                dataToParse = innerData
+            }
+        }
+
         let delegate = TopologyXMLDelegate()
-        let parser = XMLParser(data: xmlData)
+        let parser = XMLParser(data: dataToParse)
         parser.delegate = delegate
         parser.shouldProcessNamespaces = false
         parser.shouldReportNamespacePrefixes = false

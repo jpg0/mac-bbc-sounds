@@ -17,11 +17,17 @@ final class LocalProxyServer {
 
     // MARK: - Public
 
+    /// Default fixed port for LAN proxying to Sonos so firewall rules can target a stable port.
+    public static let defaultFixedPort: UInt16 = 52800
+
     /// Binding mode configured for this server.
     public let bindAddress: BindAddress
 
     /// The host address to advertise in relay and playlist URLs (e.g. LAN IP address).
     public var advertisedHost: String?
+
+    /// Preferred port to bind to, or nil for an ephemeral/automatic port.
+    public let preferredPort: UInt16?
 
     /// The port the server is listening on. Valid only after `start()` succeeds.
     private(set) var port: UInt16 = 0
@@ -46,10 +52,12 @@ final class LocalProxyServer {
     init(
         proxyConfig: ProxyConfiguration?,
         bindAddress: BindAddress = .loopback,
-        advertisedHost: String? = nil
+        advertisedHost: String? = nil,
+        preferredPort: UInt16? = nil
     ) {
         self.bindAddress = bindAddress
         self.advertisedHost = advertisedHost
+        self.preferredPort = preferredPort
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = 15
 
@@ -97,6 +105,7 @@ final class LocalProxyServer {
     @discardableResult
     func start() throws -> UInt16 {
         let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
         switch bindAddress {
         case .loopback:
             params.requiredInterfaceType = .loopback
@@ -110,35 +119,64 @@ final class LocalProxyServer {
             }
         }
 
-        let l = try NWListener(using: params, on: .any)
-        self.listener = l
+        let targetPort: NWEndpoint.Port = {
+            if let p = preferredPort, let nwPort = NWEndpoint.Port(rawValue: p) {
+                return nwPort
+            }
+            return .any
+        }()
 
-        let ready = DispatchGroup()
-        ready.enter()
+        func startListener(on port: NWEndpoint.Port) throws -> (NWListener, UInt16) {
+            let l = try NWListener(using: params, on: port)
+            let ready = DispatchGroup()
+            ready.enter()
+            var boundPort: UInt16 = 0
+            var failureError: Error?
 
-        l.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                self?.port = l.port?.rawValue ?? 0
-                ready.leave()
-            case .failed(let err):
-                print("⚠️ [LocalProxyServer] Listener failed: \(err)")
-                ready.leave()
-            default:
-                break
+            l.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    boundPort = l.port?.rawValue ?? 0
+                    self?.port = boundPort
+                    ready.leave()
+                case .failed(let err):
+                    print("⚠️ [LocalProxyServer] Listener failed on port \(port.rawValue): \(err)")
+                    failureError = err
+                    ready.leave()
+                default:
+                    break
+                }
+            }
+
+            l.newConnectionHandler = { [weak self] conn in
+                self?.handleConnection(conn)
+            }
+
+            l.start(queue: queue)
+            ready.wait()
+
+            if boundPort > 0 {
+                return (l, boundPort)
+            } else {
+                l.cancel()
+                throw failureError ?? NSError(domain: "LocalProxyServer", code: -1,
+                                              userInfo: [NSLocalizedDescriptionKey: "Listener failed to bind"])
             }
         }
 
-        l.newConnectionHandler = { [weak self] conn in
-            self?.handleConnection(conn)
-        }
-
-        l.start(queue: queue)
-        ready.wait()
-
-        guard port > 0 else {
-            throw NSError(domain: "LocalProxyServer", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "Listener failed to bind"])
+        do {
+            let (l, p) = try startListener(on: targetPort)
+            self.listener = l
+            self.port = p
+        } catch {
+            if targetPort != .any {
+                print("⚠️ [LocalProxyServer] Failed to bind to preferred port \(targetPort.rawValue), falling back to ephemeral port: \(error.localizedDescription)")
+                let (l, p) = try startListener(on: .any)
+                self.listener = l
+                self.port = p
+            } else {
+                throw error
+            }
         }
 
         if bindAddress == .any {

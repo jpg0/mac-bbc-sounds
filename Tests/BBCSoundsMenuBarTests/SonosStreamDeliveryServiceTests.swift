@@ -101,4 +101,17 @@ final class SonosStreamDeliveryServiceTests: XCTestCase {
         XCTAssertEqual(prepared.bindAddress, LocalProxyServer.BindAddress.any, "New server should be bound to .any")
         XCTAssertFalse(prepared === loopbackServer, "Should return a newly created server")
     }
+
+    func testPrepareServerUsesDefaultFixedPort() throws {
+        let service = SonosStreamDeliveryService(getLANIP: { "192.168.1.88" })
+        let prepared = try service.prepareServer(proxyConfig: mockProxyConfig, existingServer: nil)
+        defer { prepared.stop() }
+
+        XCTAssertTrue(prepared.isRunning)
+        if prepared.port != LocalProxyServer.defaultFixedPort {
+            XCTAssertGreaterThan(prepared.port, 0)
+        } else {
+            XCTAssertEqual(prepared.port, LocalProxyServer.defaultFixedPort)
+        }
+    }
 }

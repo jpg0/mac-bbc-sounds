@@ -50,6 +50,17 @@ struct ProxySettingsView: View {
                     }
                 }
                 .foregroundColor(.secondary)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Sonos Cross-VLAN Streaming")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("If Sonos is on an IoT VLAN, allow incoming TCP from IoT to port 52800 on your LAN.")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .padding(6)
+                .background(Color.primary.opacity(0.04))
+                .cornerRadius(4)
             }
             .disabled(!viewModel.proxyEnabled)
             

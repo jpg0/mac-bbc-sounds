@@ -19,6 +19,8 @@ struct SpeakerPickerPopover: View {
     @State private var deviceVolumes: [String: Int] = [:]
     @State private var hoveredTargetId: String? = nil
     @State private var volumeLoadTask: Task<Void, Never>?
+    @State private var isShowingAddIP: Bool = false
+    @State private var manualIP: String = ""
 
     init(player: PlayerService) {
         self.player = player
@@ -71,8 +73,38 @@ struct SpeakerPickerPopover: View {
                 .buttonStyle(.plain)
                 .disabled(player.discoveryService.isScanning)
                 .help("Scan for Sonos speakers")
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isShowingAddIP.toggle()
+                    }
+                } label: {
+                    Image(systemName: isShowingAddIP ? "xmark" : "plus")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Connect to Sonos speaker by IP (useful across VLANs/subnets)")
             }
             .padding(.bottom, 2)
+
+            if isShowingAddIP {
+                HStack(spacing: 6) {
+                    TextField("Speaker IP (e.g. 192.168.11.181)", text: $manualIP)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                        .onSubmit {
+                            submitManualIP()
+                        }
+                    Button("Connect") {
+                        submitManualIP()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(manualIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(.vertical, 2)
+            }
 
             Divider()
 
@@ -114,47 +146,57 @@ struct SpeakerPickerPopover: View {
                             .multilineTextAlignment(.center)
                             .padding(.top, 4)
 
-                        Button {
-                            player.scanForDevices()
-                        } label: {
-                            Text("Scan Network")
-                                .font(.system(size: 11, weight: .medium))
+                        HStack(spacing: 8) {
+                            Button {
+                                player.scanForDevices()
+                            } label: {
+                                Text("Scan Network")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+
+                            Button {
+                                withAnimation {
+                                    isShowingAddIP = true
+                                }
+                            } label: {
+                                Text("Connect by IP…")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 4)
             } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(player.discoveryService.discoveredDevices) { device in
-                            let isActive = player.outputTarget.sonosDevice?.id == device.id
-                            let currentVol: Int? = {
-                                if isActive {
-                                    return Int(round(player.volume * 100))
-                                }
-                                return deviceVolumes[device.id]
-                            }()
+                VStack(spacing: 4) {
+                    ForEach(player.discoveryService.discoveredDevices) { device in
+                        let isActive = player.outputTarget.sonosDevice?.id == device.id
+                        let currentVol: Int? = {
+                            if isActive {
+                                return Int(round(player.volume * 100))
+                            }
+                            return deviceVolumes[device.id]
+                        }()
 
-                            let item = SpeakerPickerItem(
-                                id: device.id,
-                                icon: device.groupBadge != nil ? "hifispeaker.2.fill" : "hifispeaker.fill",
-                                title: device.name,
-                                groupBadge: device.groupBadge,
-                                subtitle: device.modelName,
-                                isActive: isActive,
-                                isOnline: true,
-                                volume: currentVol,
-                                target: .sonos(device)
-                            )
+                        let item = SpeakerPickerItem(
+                            id: device.id,
+                            icon: device.groupBadge != nil ? "hifispeaker.2.fill" : "hifispeaker.fill",
+                            title: device.name,
+                            groupBadge: device.groupBadge,
+                            subtitle: device.modelName,
+                            isActive: isActive,
+                            isOnline: true,
+                            volume: currentVol,
+                            target: .sonos(device)
+                        )
 
-                            deviceRow(item: item)
-                        }
+                        deviceRow(item: item)
                     }
                 }
-                .frame(maxHeight: 180)
             }
         }
         .padding(12)
@@ -268,6 +310,16 @@ struct SpeakerPickerPopover: View {
                     deviceVolumes[device.id] = vol
                 }
             }
+        }
+    }
+
+    private func submitManualIP() {
+        let trimmed = manualIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        player.addKnownSonosHost(trimmed)
+        manualIP = ""
+        withAnimation {
+            isShowingAddIP = false
         }
     }
 }

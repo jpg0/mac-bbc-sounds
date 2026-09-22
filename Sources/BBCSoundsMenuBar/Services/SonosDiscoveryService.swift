@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import SSDPClient
 
 /// Service responsible for SSDP multicast discovery of Sonos speakers on the local network,
 /// topology resolution, and exposing an observable list of discovered rooms and groups.
@@ -24,6 +23,9 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
 
     // MARK: - Dependencies & State
 
+    public static let knownHostsKey = "SonosDiscoveryKnownHosts"
+    @Published public private(set) var knownHosts: Set<String> = []
+
     private let discoveryClient: SSDPDiscovery
     private let session: URLSession
     private var scanTimer: Timer?
@@ -38,6 +40,8 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
     public init(discoveryClient: SSDPDiscovery = SSDPDiscovery(), session: URLSession = .shared) {
         self.discoveryClient = discoveryClient
         self.session = session
+        let saved = UserDefaults.standard.stringArray(forKey: Self.knownHostsKey) ?? []
+        self.knownHosts = Set(saved)
         super.init()
         self.discoveryClient.delegate = self
     }
@@ -71,9 +75,33 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
     /// Triggers an immediate SSDP discovery scan and prunes expired devices.
     public func scan(duration: TimeInterval = 5) {
         pruneStaleDevices()
+        probeKnownHosts()
         guard !isScanning else { return }
         isScanning = true
         discoveryClient.discoverService(forDuration: duration, searchTarget: Self.zonePlayerSearchTarget, port: 1900)
+    }
+
+    /// Probes all cached/known speaker hosts to refresh topology across subnets.
+    public func probeKnownHosts() {
+        for host in knownHosts {
+            guard let url = URL(string: "http://\(host):1400/xml/device_description.xml") else { continue }
+            Task { @MainActor [weak self] in
+                await self?.processDiscoveredLocation(url)
+            }
+        }
+    }
+
+    /// Manually adds and immediately probes a known Sonos speaker IP or hostname.
+    public func addKnownHost(_ host: String) {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        knownHosts.insert(trimmed)
+        UserDefaults.standard.set(Array(knownHosts), forKey: Self.knownHostsKey)
+        if let url = URL(string: "http://\(trimmed):1400/xml/device_description.xml") {
+            Task { @MainActor [weak self] in
+                await self?.processDiscoveredLocation(url)
+            }
+        }
     }
 
     /// Prunes any discovered speakers that have not been seen within the TTL duration.
@@ -121,18 +149,42 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
             print("⚠️ [SonosDiscoveryService] Failed to fetch device description from \(locationURL): \(error)")
         }
 
-        // 2. Fetch and parse zone topology
-        guard let topologyURL = URL(string: "http://\(host):\(port)/status/topology") else { return }
-        do {
-            let (topoData, _) = try await session.data(from: topologyURL)
-            let groups = try SonosTopologyParser.parse(xmlData: topoData)
-            updateDevices(with: groups, fallbackHost: host, fallbackPort: port, currentDesc: description)
-        } catch {
-            print("⚠️ [SonosDiscoveryService] Failed to fetch topology from \(topologyURL): \(error)")
-            // If topology fails but we have a description, expose the single device
-            if let desc = description {
-                handleSingleDeviceFallback(desc: desc, host: host, port: port)
+        // 2. Fetch and parse zone topology (prefer GetZoneGroupState SOAP on modern firmware, fallback to /status/topology)
+        var groups: [SonosZoneGroup] = []
+
+        if let soapURL = URL(string: "http://\(host):\(port)/ZoneGroupTopology/Control") {
+            var soapReq = URLRequest(url: soapURL)
+            soapReq.httpMethod = "POST"
+            soapReq.timeoutInterval = 4.0
+            soapReq.setValue("\"urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState\"", forHTTPHeaderField: "SOAPACTION")
+            soapReq.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
+            let soapBody = """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:GetZoneGroupState xmlns:u="urn:schemas-upnp-org:service:ZoneGroupTopology:1"></u:GetZoneGroupState></s:Body></s:Envelope>
+            """
+            soapReq.httpBody = Data(soapBody.utf8)
+            if let (soapData, _) = try? await session.data(for: soapReq),
+               let parsed = try? SonosTopologyParser.parse(xmlData: soapData),
+               !parsed.isEmpty {
+                groups = parsed
             }
+        }
+
+        if groups.isEmpty, let topologyURL = URL(string: "http://\(host):\(port)/status/topology") {
+            do {
+                let (topoData, _) = try await session.data(from: topologyURL)
+                let parsed = try SonosTopologyParser.parse(xmlData: topoData)
+                if !parsed.isEmpty {
+                    groups = parsed
+                }
+            } catch {
+                print("⚠️ [SonosDiscoveryService] Failed to fetch topology from \(topologyURL): \(error)")
+            }
+        }
+
+        if !groups.isEmpty {
+            updateDevices(with: groups, fallbackHost: host, fallbackPort: port, currentDesc: description)
+        } else if let desc = description {
+            handleSingleDeviceFallback(desc: desc, host: host, port: port)
         }
     }
 
@@ -224,9 +276,28 @@ public final class SonosDiscoveryService: NSObject, ObservableObject {
 
         self.discoveredDevices = Array(coordMap.values).sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         self.allZoneDevices = Array(memberMap.values).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        // Update and persist known hosts
+        var updatedHosts = knownHosts
+        updatedHosts.insert(fallbackHost)
+        for group in groups {
+            for member in group.members {
+                if let memberHost = member.location?.host {
+                    updatedHosts.insert(memberHost)
+                }
+            }
+        }
+        if updatedHosts != knownHosts {
+            knownHosts = updatedHosts
+            UserDefaults.standard.set(Array(updatedHosts), forKey: Self.knownHostsKey)
+        }
     }
 
     private func handleSingleDeviceFallback(desc: SonosDeviceDescription, host: String, port: UInt16) {
+        if !knownHosts.contains(host) {
+            knownHosts.insert(host)
+            UserDefaults.standard.set(Array(knownHosts), forKey: Self.knownHostsKey)
+        }
         let normUUID = desc.udn.normalizedSonosUUID
         let fallback = SonosDevice(
             id: normUUID,

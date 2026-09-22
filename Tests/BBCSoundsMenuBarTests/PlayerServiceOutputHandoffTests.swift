@@ -67,7 +67,8 @@ final class PlayerServiceOutputHandoffTests: XCTestCase {
         // Allow async Sonos calls to complete
         try await Task.sleep(nanoseconds: 300_000_000)
 
-        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock.receivedURI, expectedTransportURI)
         XCTAssertEqual(mock.transportState, "PLAYING")
         XCTAssertTrue(player.isPlaying)
         XCTAssertEqual(player.currentProgramme?.id, "m001live")
@@ -114,7 +115,8 @@ final class PlayerServiceOutputHandoffTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
 
         XCTAssertEqual(player.outputTarget, .sonos(device))
-        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock.receivedURI, expectedTransportURI)
         XCTAssertTrue(mock.receivedActions.contains("SetAVTransportURI"))
         XCTAssertTrue(mock.receivedActions.contains("Seek"))
         XCTAssertTrue(mock.receivedActions.contains("Play"))
@@ -261,7 +263,7 @@ final class PlayerServiceOutputHandoffTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
 
         let receivedURI = try XCTUnwrap(mock.receivedURI)
-        XCTAssertTrue(receivedURI.hasPrefix("http://192.168.1.150:"), "Should route via LAN IP relay URL")
+        XCTAssertTrue(receivedURI.hasPrefix("x-rincon-mp3radio://192.168.1.150:"), "Should route via LAN IP relay URL with Sonos stream prefix")
         XCTAssertTrue(receivedURI.contains("/playlist?url=https://open.live.bbc.co.uk/den.m3u8"))
         XCTAssertEqual(mock.transportState, "PLAYING")
     }
@@ -305,7 +307,8 @@ final class PlayerServiceOutputHandoffTests: XCTestCase {
         XCTAssertEqual(player.outputTarget, .sonos(dev2))
         XCTAssertEqual(player.sonosController?.device.id, dev2.id)
         XCTAssertTrue(mock1.receivedActions.contains("Pause") || mock1.receivedActions.contains("Stop"))
-        XCTAssertEqual(mock2.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock2.receivedURI, expectedTransportURI)
         XCTAssertTrue(mock2.receivedActions.contains("Seek"))
         XCTAssertEqual(mock2.transportState, "PLAYING")
     }
@@ -336,9 +339,44 @@ final class PlayerServiceOutputHandoffTests: XCTestCase {
         try await Task.sleep(nanoseconds: 350_000_000)
 
         XCTAssertEqual(player.outputTarget, .sonos(device))
-        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI2 = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock.receivedURI, expectedTransportURI2)
         XCTAssertTrue(mock.receivedActions.contains("Seek"))
         XCTAssertEqual(mock.transportState, "PLAYING")
+    }
+
+    func testHandoffToFailingSonosResetsLoadingAndSetsPlayerError() async throws {
+        let (mock, device) = try makeMockDevice(roomName: "Faulty Room")
+        defer { mock.stop() }
+        mock.avTransportError = (statusCode: 500, errorCode: 800)
+
+        let player = PlayerService()
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/faulty.m3u8")!
+        let prog = Programme(
+            id: "m008faulty",
+            index: 0,
+            name: "Faulty Show",
+            channel: "BBC Radio 1",
+            duration: "00:30:00",
+            description: "Faulty stream test",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        player.play(url: streamURL, programme: prog)
+
+        do {
+            try await player.setOutputTarget(.sonos(device))
+        } catch {
+            // Expected to throw
+        }
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(player.isLoading, "player.isLoading should be false after Sonos failure")
+        XCTAssertFalse(player.isPlaying, "player.isPlaying should be false after Sonos failure")
+        XCTAssertNotNil(player.playerError, "player.playerError should be set when Sonos rejects the stream")
     }
 
     private func makeMockDevice(

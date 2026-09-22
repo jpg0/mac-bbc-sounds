@@ -57,7 +57,7 @@ struct PlayerControlsView: View {
                             HStack(spacing: 4) {
                                 Image(systemName: "hifispeaker.fill")
                                     .font(.system(size: 9))
-                                Text(player.isPlaying ? "Playing to \(device.displayName)" : (player.isLoading ? "Connecting to \(device.displayName)..." : "Connected to \(device.displayName)"))
+                                Text(player.isPlaying ? "Playing to \(device.displayName)" : ((player.isLoading || player.sonosController?.transportState == .transitioning) ? "Connecting to \(device.displayName)..." : "Connected to \(device.displayName)"))
                                     .font(.system(size: 10, weight: .medium))
                                     .lineLimit(1)
                             }

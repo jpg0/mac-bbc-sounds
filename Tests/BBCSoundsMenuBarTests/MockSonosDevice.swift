@@ -20,6 +20,12 @@ final class MockSonosDevice {
     private var _receivedDIDLLite: String?
     private var _receivedActions: [String] = []
     private var _customTopologyXML: String?
+    private var _avTransportError: (statusCode: Int, errorCode: Int)?
+
+    var avTransportError: (statusCode: Int, errorCode: Int)? {
+        get { lock.withLock { _avTransportError } }
+        set { lock.withLock { _avTransportError = newValue } }
+    }
 
     var customTopologyXML: String? {
         get { lock.withLock { _customTopologyXML } }
@@ -269,6 +275,25 @@ final class MockSonosDevice {
         if method == "POST" && path == "/MediaRenderer/AVTransport/Control" {
             let action = resolveSOAPAction(headers: headers, bodyText: bodyText)
             recordAction(action, body: bodyText)
+            if let fault = avTransportError {
+                let faultXML = """
+                <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+                  <s:Body>
+                    <s:Fault>
+                      <faultcode>s:Client</faultcode>
+                      <faultstring>UPnPError</faultstring>
+                      <detail>
+                        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+                          <errorCode>\(fault.errorCode)</errorCode>
+                        </UPnPError>
+                      </detail>
+                    </s:Fault>
+                  </s:Body>
+                </s:Envelope>
+                """
+                send(conn: conn, code: fault.statusCode, contentType: "text/xml; charset=\"utf-8\"", body: Data(faultXML.utf8))
+                return
+            }
             let responseXML = handleAVTransportAction(action: action, bodyText: bodyText)
             send(conn: conn, code: 200, contentType: "text/xml; charset=\"utf-8\"", body: Data(responseXML.utf8))
             return

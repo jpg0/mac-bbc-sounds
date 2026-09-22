@@ -12,10 +12,14 @@ public struct SonosMetadata: Equatable, Sendable {
     /// Album artwork thumbnail URL
     public let albumArtURI: String?
 
-    public init(title: String, creator: String? = nil, albumArtURI: String? = nil) {
+    /// Whether the programme is a live broadcast
+    public let isLive: Bool
+
+    public init(title: String, creator: String? = nil, albumArtURI: String? = nil, isLive: Bool = false) {
         self.title = title
         self.creator = creator
         self.albumArtURI = albumArtURI
+        self.isLive = isLive
     }
 
     /// Convenience initializer mapping from BBC Sounds `Programme`
@@ -24,6 +28,7 @@ public struct SonosMetadata: Equatable, Sendable {
         self.creator = programme.channel.isEmpty ? nil : programme.channel
         let artwork = programme.artworkURL?.replacingOccurrences(of: "{recipe}", with: "400x400")
         self.albumArtURI = (artwork?.isEmpty == false) ? artwork : nil
+        self.isLive = programme.isLive
     }
 
     /// Generates unescaped DIDL-Lite XML for UPnP metadata.
@@ -37,7 +42,8 @@ public struct SonosMetadata: Equatable, Sendable {
         if let albumArtURI = albumArtURI, !albumArtURI.isEmpty {
             xml += "<upnp:albumArtURI>\(Self.escapeXML(albumArtURI))</upnp:albumArtURI>"
         }
-        xml += "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+        let upnpClass = isLive ? "object.item.audioItem.audioBroadcast" : "object.item.audioItem.musicTrack"
+        xml += "<upnp:class>\(upnpClass)</upnp:class>"
         xml += "</item></DIDL-Lite>"
         return xml
     }

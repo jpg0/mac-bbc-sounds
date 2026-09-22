@@ -97,7 +97,8 @@ final class SonosControllerTests: XCTestCase {
 
         try await controller.setAVTransportURI(url: streamURL, metadata: metadata)
 
-        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock.receivedURI, expectedTransportURI)
         let receivedDIDL = try XCTUnwrap(mock.receivedDIDLLite)
         XCTAssertTrue(receivedDIDL.contains("<dc:title>Breakfast Show</dc:title>"))
         XCTAssertTrue(receivedDIDL.contains("<dc:creator>BBC Radio 1</dc:creator>"))
@@ -141,10 +142,12 @@ final class SonosControllerTests: XCTestCase {
 
         try await controller.setAVTransportURI(url: streamURL, programme: prog)
 
-        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString)
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        XCTAssertEqual(mock.receivedURI, expectedTransportURI)
         let receivedDIDL = try XCTUnwrap(mock.receivedDIDLLite)
         XCTAssertTrue(receivedDIDL.contains("<dc:title>Late Junction</dc:title>"))
         XCTAssertTrue(receivedDIDL.contains("<dc:creator>BBC Radio 3</dc:creator>"))
+        XCTAssertTrue(receivedDIDL.contains("<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"))
     }
 
     func testPlaybackCommandsPlayPauseStopOnMockDevice() async throws {
@@ -277,6 +280,27 @@ final class SonosControllerTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testSonosTransportURIConversion() {
+        let httpURL = URL(string: "http://192.168.1.50:52800/playlist?url=https%3A%2F%2Fexample.com%2Fstream.m3u8")!
+        let sonosHTTP = SonosController.sonosTransportURI(for: httpURL)
+        XCTAssertEqual(sonosHTTP.absoluteString, "x-rincon-mp3radio://192.168.1.50:52800/playlist?url=https%3A%2F%2Fexample.com%2Fstream.m3u8")
+
+        let httpsURL = URL(string: "https://as-hls-ww-live.akamaized.net/live/bbc_6music.m3u8")!
+        let sonosHTTPS = SonosController.sonosTransportURI(for: httpsURL)
+        XCTAssertEqual(sonosHTTPS.absoluteString, "x-rincon-mp3radio://as-hls-ww-live.akamaized.net/live/bbc_6music.m3u8")
+
+        let alreadyPrefixed = URL(string: "x-rincon-mp3radio://some.host/stream.mp3")!
+        XCTAssertEqual(SonosController.sonosTransportURI(for: alreadyPrefixed), alreadyPrefixed)
+
+        let hlsPrefixed = URL(string: "hls-radio://some.host/stream.m3u8")!
+        XCTAssertEqual(SonosController.sonosTransportURI(for: hlsPrefixed), hlsPrefixed)
+    }
+
+    func testSonosError714Description() {
+        let fault714 = SonosError.soapFault(statusCode: 500, detail: "<UPnPError><errorCode>714</errorCode></UPnPError>")
+        XCTAssertTrue(fault714.errorDescription?.contains("illegal MIME-type") == true)
     }
 
     // MARK: - Seam 3: XML Parsers for RenderingControl & AVTransport

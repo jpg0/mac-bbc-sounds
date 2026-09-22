@@ -14,6 +14,15 @@ public enum SonosError: LocalizedError, Equatable {
         case .invalidResponse(let statusCode):
             return "Sonos returned an invalid HTTP response (status \(statusCode))."
         case .soapFault(let statusCode, let detail):
+            if detail.contains("<errorCode>800</errorCode>") {
+                return "Sonos cannot access this stream (stream unreachable or geo-blocked)."
+            }
+            if detail.contains("<errorCode>701</errorCode>") {
+                return "Sonos playback failed (transition unavailable)."
+            }
+            if detail.contains("<errorCode>714</errorCode>") {
+                return "Sonos cannot play this stream format (illegal MIME-type). The stream URI requires a compatible Sonos stream protocol."
+            }
             return "Sonos SOAP fault (status \(statusCode)): \(detail)"
         case .networkError(let message):
             return "Network error communicating with Sonos: \(message)"
@@ -66,7 +75,14 @@ public final class SonosController: ObservableObject {
 
     // MARK: - Init & Deinit
 
-    public init(device: SonosDevice, session: URLSession = .shared) {
+    nonisolated public static let defaultSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 8.0
+        config.timeoutIntervalForResource = 12.0
+        return URLSession(configuration: config)
+    }()
+
+    public init(device: SonosDevice, session: URLSession = defaultSession) {
         self.device = device
         self.session = session
     }
@@ -158,9 +174,28 @@ public final class SonosController: ObservableObject {
 
     // MARK: - AVTransport Actions
 
+    /// Converts an HTTP/HTTPS stream URL into a Sonos-compatible radio/stream URI
+    /// by replacing http:// or https:// with x-rincon-mp3radio://.
+    public static func sonosTransportURI(for url: URL) -> URL {
+        let str = url.absoluteString
+        if str.hasPrefix("x-rincon-mp3radio:") || str.hasPrefix("hls-radio:") {
+            return url
+        }
+        if str.hasPrefix("http://") {
+            let replaced = "x-rincon-mp3radio://" + str.dropFirst("http://".count)
+            return URL(string: replaced) ?? url
+        }
+        if str.hasPrefix("https://") {
+            let replaced = "x-rincon-mp3radio://" + str.dropFirst("https://".count)
+            return URL(string: replaced) ?? url
+        }
+        return url
+    }
+
     /// Sets the playback URI and DIDL-Lite metadata on the target Sonos device.
     public func setAVTransportURI(url: URL, metadata: SonosMetadata? = nil) async throws {
-        let escapedURI = SonosMetadata.escapeXML(url.absoluteString)
+        let transportURL = Self.sonosTransportURI(for: url)
+        let escapedURI = SonosMetadata.escapeXML(transportURL.absoluteString)
         let escapedDIDL = metadata.map { SonosMetadata.escapeXML($0.didlLiteXML()) } ?? ""
 
         let actionBody = """
@@ -264,7 +299,11 @@ public final class SonosController: ObservableObject {
         if let tInfo = try? await getTransportInfo() {
             self.transportInfo = tInfo
             self.transportState = tInfo.state
-            self.isPlaying = (tInfo.state == .playing)
+            if tInfo.state == .playing {
+                self.isPlaying = true
+            } else if tInfo.state == .stopped || tInfo.state == .paused {
+                self.isPlaying = false
+            }
         }
         if let pInfo = try? await getPositionInfo() {
             self.positionInfo = pInfo
