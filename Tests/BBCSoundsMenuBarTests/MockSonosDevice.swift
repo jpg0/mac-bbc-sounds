@@ -14,6 +14,7 @@ final class MockSonosDevice {
     private let lock = NSLock()
     private var _transportState: String
     private var _currentVolume: Int
+    private var _isMuted: Bool
     private var _trackDuration: String
     private var _trackRelTime: String
     private var _receivedURI: String?
@@ -40,6 +41,11 @@ final class MockSonosDevice {
     var currentVolume: Int {
         get { lock.withLock { _currentVolume } }
         set { lock.withLock { _currentVolume = newValue } }
+    }
+
+    var isMuted: Bool {
+        get { lock.withLock { _isMuted } }
+        set { lock.withLock { _isMuted = newValue } }
     }
 
     var trackDuration: String {
@@ -92,6 +98,7 @@ final class MockSonosDevice {
         modelName: String = "Sonos One",
         transportState: String = "STOPPED",
         currentVolume: Int = 25,
+        isMuted: Bool = false,
         trackDuration: String = "01:00:00",
         trackRelTime: String = "00:05:00"
     ) {
@@ -100,6 +107,7 @@ final class MockSonosDevice {
         self.modelName = modelName
         self._transportState = transportState
         self._currentVolume = currentVolume
+        self._isMuted = isMuted
         self._trackDuration = trackDuration
         self._trackRelTime = trackRelTime
     }
@@ -433,6 +441,20 @@ final class MockSonosDevice {
             <u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
               <CurrentVolume>\(vol)</CurrentVolume>
             </u:GetVolumeResponse>
+            """)
+
+        case "SetMute":
+            if let muteStr = extractTag(name: "DesiredMute", from: bodyText), let mute = Int(muteStr) {
+                isMuted = (mute != 0)
+            }
+            return soapEnvelope(body: "<u:SetMuteResponse xmlns:u=\"urn:schemas-upnp-org:service:RenderingControl:1\" />")
+
+        case "GetMute":
+            let muteVal = isMuted ? 1 : 0
+            return soapEnvelope(body: """
+            <u:GetMuteResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              <CurrentMute>\(muteVal)</CurrentMute>
+            </u:GetMuteResponse>
             """)
 
         default:

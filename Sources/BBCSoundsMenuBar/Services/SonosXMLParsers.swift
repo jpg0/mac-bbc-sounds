@@ -292,6 +292,54 @@ private final class VolumeXMLDelegate: NSObject, XMLParserDelegate {
     }
 }
 
+// MARK: - RenderingControl Mute Parser
+
+public enum SonosMuteParser {
+    public static func parse(xmlData: Data) throws -> Bool {
+        let delegate = MuteXMLDelegate()
+        let parser = XMLParser(data: xmlData)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+
+        guard parser.parse() else {
+            throw parser.parserError ?? SonosXMLError.invalidXML
+        }
+
+        guard let mute = delegate.isMuted else {
+            throw SonosXMLError.missingRequiredField("CurrentMute")
+        }
+
+        return mute
+    }
+}
+
+private final class MuteXMLDelegate: NSObject, XMLParserDelegate {
+    var isMuted: Bool?
+    private var currentText: String = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String : String] = [:]) {
+        currentText = ""
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        currentText += string
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        if elementName.hasSuffix("CurrentMute") {
+            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let val = Int(trimmed) {
+                isMuted = (val != 0)
+            } else if trimmed.lowercased() == "true" {
+                isMuted = true
+            } else if trimmed.lowercased() == "false" {
+                isMuted = false
+            }
+        }
+    }
+}
+
 // MARK: - AVTransport TransportInfo Parser
 
 public enum SonosTransportInfoParser {

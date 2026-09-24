@@ -23,6 +23,7 @@ class PlayerService: ObservableObject {
     @Published public private(set) var currentStreamURL: URL? = nil
 
     public let discoveryService: SonosDiscoveryService
+    public let systemAudioService: SystemAudioServiceProtocol
     var deliveryService = SonosStreamDeliveryService()
     var sonosControllerFactory: ((SonosDevice) -> SonosController)?
 
@@ -50,12 +51,38 @@ class PlayerService: ObservableObject {
     private var sonosCancellables = Set<AnyCancellable>()
     private var discoveryCancellable: AnyCancellable?
     private var handoffTask: Task<Void, Never>?
+    private var sonosVolumeTask: Task<Void, Never>?
+    private var pendingSonosVolume: Int?
 
-    init(discoveryService: SonosDiscoveryService? = nil) {
+    init(
+        discoveryService: SonosDiscoveryService? = nil,
+        systemAudioService: SystemAudioServiceProtocol? = nil
+    ) {
         self.volume = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
         let discovery = discoveryService ?? SonosDiscoveryService()
         self.discoveryService = discovery
+        let sysAudio = systemAudioService ?? SystemAudioService()
+        self.systemAudioService = sysAudio
         setupDiscoveryObservation()
+        setupSystemAudioObservation()
+    }
+
+    private func setupSystemAudioObservation() {
+        systemAudioService.onVolumeChanged = { [weak self] newVolume in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                self.setVolume(newVolume)
+            }
+        }
+
+        systemAudioService.onMuteChanged = { [weak self] isMuted in
+            Task { @MainActor [weak self] in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                self.handleSystemMuteChanged(isMuted)
+            }
+        }
+
+        systemAudioService.startMonitoring()
     }
 
     private func setupDiscoveryObservation() {
@@ -122,6 +149,14 @@ class PlayerService: ObservableObject {
 
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                if let initialVol = try? await controller.getVolume() {
+                    let normalized = Float(initialVol) / 100.0
+                    self.volume = normalized
+                    self.systemAudioService.setVolume(normalized, silently: true)
+                }
+                if let initialMute = try? await controller.getMute() {
+                    self.systemAudioService.setMute(initialMute, silently: true)
+                }
                 do {
                     try await self.startSonosPlayback(
                         controller: controller,
@@ -381,7 +416,10 @@ class PlayerService: ObservableObject {
         case .thisMac:
             await teardownSonosController()
 
-            self.volume = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
+            let savedVol = UserDefaults.app.value(forKey: "PlayerVolume") as? Float ?? 0.7
+            self.volume = savedVol
+            self.systemAudioService.setVolume(savedVol, silently: true)
+            self.systemAudioService.setMute(false, silently: true)
 
             if let streamURL = streamURL, let prog = prog {
                 setupLocalPlayer(url: streamURL, programme: prog, seekTo: handoffTime, autoPlay: wasPlaying)
@@ -402,7 +440,12 @@ class PlayerService: ObservableObject {
             observeSonosController(controller)
 
             if let initialVol = try? await controller.getVolume() {
-                self.volume = Float(initialVol) / 100.0
+                let normalized = Float(initialVol) / 100.0
+                self.volume = normalized
+                self.systemAudioService.setVolume(normalized, silently: true)
+            }
+            if let initialMute = try? await controller.getMute() {
+                self.systemAudioService.setMute(initialMute, silently: true)
             }
 
             if let streamURL = streamURL, let prog = prog {
@@ -476,7 +519,16 @@ class PlayerService: ObservableObject {
                 let normalized = Float(vol) / 100.0
                 if abs(self.volume - normalized) > 0.01 {
                     self.volume = normalized
+                    self.systemAudioService.setVolume(normalized, silently: true)
                 }
+            }
+            .store(in: &sonosCancellables)
+
+        controller.$isMuted
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isMuted in
+                guard let self = self, self.outputTarget.isSonos else { return }
+                self.systemAudioService.setMute(isMuted, silently: true)
             }
             .store(in: &sonosCancellables)
     }
@@ -559,6 +611,9 @@ class PlayerService: ObservableObject {
         trackUpdateTask = nil
         localProxyServer?.stop()
         localProxyServer = nil
+        sonosVolumeTask?.cancel()
+        sonosVolumeTask = nil
+        pendingSonosVolume = nil
 
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         durationObserver = nil
@@ -566,15 +621,42 @@ class PlayerService: ObservableObject {
     }
 
     func setVolume(_ v: Float) {
-        volume = v
+        let clamped = max(0.0, min(1.0, v))
+        volume = clamped
         switch outputTarget {
         case .thisMac:
-            player?.volume = v
+            player?.volume = clamped
         case .sonos:
-            let sonosVol = Int(round(v * 100))
-            Task { [weak self] in
-                try? await self?.sonosController?.setVolume(sonosVol)
+            let sonosVol = Int(round(clamped * 100))
+            systemAudioService.setVolume(clamped, silently: true)
+            dispatchSonosVolume(sonosVol)
+        }
+    }
+
+    private func dispatchSonosVolume(_ sonosVol: Int) {
+        if sonosVolumeTask != nil {
+            pendingSonosVolume = sonosVol
+            return
+        }
+
+        sonosVolumeTask = Task { [weak self] in
+            guard let self = self else { return }
+            try? await self.sonosController?.setVolume(sonosVol)
+            self.sonosVolumeTask = nil
+
+            if let nextVol = self.pendingSonosVolume {
+                self.pendingSonosVolume = nil
+                if nextVol != sonosVol {
+                    self.dispatchSonosVolume(nextVol)
+                }
             }
+        }
+    }
+
+    private func handleSystemMuteChanged(_ isMuted: Bool) {
+        Task { [weak self] in
+            guard let self = self, self.outputTarget.isSonos else { return }
+            try? await self.sonosController?.setMute(isMuted)
         }
     }
 

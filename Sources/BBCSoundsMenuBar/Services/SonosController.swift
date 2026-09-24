@@ -48,6 +48,9 @@ public final class SonosController: ObservableObject {
     /// Current speaker volume (scale 0-100)
     @Published public private(set) var volume: Int = 0
 
+    /// Current speaker mute state
+    @Published public private(set) var isMuted: Bool = false
+
     /// Transport info representing state, status, and speed
     @Published public private(set) var transportInfo: SonosTransportInfo = SonosTransportInfo()
 
@@ -170,6 +173,72 @@ public final class SonosController: ObservableObject {
         )
 
         self.volume = clamped
+    }
+
+    /// Retrieves current speaker mute state via RenderingControl SOAP action.
+    @discardableResult
+    public func getMute() async throws -> Bool {
+        guard let endpoint = renderingControlEndpoint else {
+            throw SonosError.invalidEndpoint
+        }
+
+        let actionBody = """
+          <InstanceID>0</InstanceID>
+          <Channel>Master</Channel>
+        """
+
+        let soapBody = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:GetMute xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              \(actionBody)
+            </u:GetMute>
+          </s:Body>
+        </s:Envelope>
+        """
+
+        let data = try await sendSOAP(
+            endpoint: endpoint,
+            service: "RenderingControl:1",
+            action: "GetMute",
+            body: soapBody
+        )
+
+        let muted = try SonosMuteParser.parse(xmlData: data)
+        self.isMuted = muted
+        return muted
+    }
+
+    /// Sets speaker mute state via RenderingControl SOAP action.
+    public func setMute(_ muted: Bool) async throws {
+        guard let endpoint = renderingControlEndpoint else {
+            throw SonosError.invalidEndpoint
+        }
+
+        let actionBody = """
+          <InstanceID>0</InstanceID>
+          <Channel>Master</Channel>
+          <DesiredMute>\(muted ? "1" : "0")</DesiredMute>
+        """
+
+        let soapBody = """
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:SetMute xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">
+              \(actionBody)
+            </u:SetMute>
+          </s:Body>
+        </s:Envelope>
+        """
+
+        _ = try await sendSOAP(
+            endpoint: endpoint,
+            service: "RenderingControl:1",
+            action: "SetMute",
+            body: soapBody
+        )
+
+        self.isMuted = muted
     }
 
     // MARK: - AVTransport Actions
@@ -295,6 +364,9 @@ public final class SonosController: ObservableObject {
     public func pollState() async {
         if let vol = try? await getVolume() {
             self.volume = vol
+        }
+        if let muted = try? await getMute() {
+            self.isMuted = muted
         }
         if let tInfo = try? await getTransportInfo() {
             self.transportInfo = tInfo
