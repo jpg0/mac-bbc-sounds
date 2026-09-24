@@ -3,7 +3,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var viewModel: AppViewModel
     @State private var showingSettings = false
-    @State private var selectedTab = "bookmarks"
+    @State private var selectedTab = "shows"
+    @State private var selectedShowForDetail: Programme? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,7 +39,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Image(systemName: "clock.arrow.circlepath")
-                            .foregroundColor(.blue)
+                            .foregroundColor(.accentColor)
                         Text("Resume playback?")
                             .font(.subheadline.bold())
                         Spacer()
@@ -70,7 +71,7 @@ struct ContentView: View {
                     }
                 }
                 .padding(10)
-                .background(Color.blue.opacity(0.1))
+                .background(Color.accentColor.opacity(0.1))
                 .cornerRadius(8)
                 .padding(8)
                 
@@ -94,33 +95,44 @@ struct ContentView: View {
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxHeight: 120) // Limit the space used by the error log
+                .frame(maxHeight: 120)
                 Divider()
             }
 
-            Picker("", selection: $selectedTab) {
-                Text("Bookmarks").tag("bookmarks")
-                Text("Search").tag("search")
-                Text("Tracklist").tag("tracklist")
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            
-            Divider()
-            Spacer().frame(height: 1)
-            VStack(spacing: 0) {
-                if selectedTab == "bookmarks" {
-                    BookmarksView()
-                        .environmentObject(viewModel)
-                } else if selectedTab == "search" {
-                    SearchView()
-                        .environmentObject(viewModel)
-                } else {
-                    TracklistView(player: viewModel.player)
+            // Detail view vs Tabs
+            if let detailShow = selectedShowForDetail {
+                ShowDetailView(
+                    programme: detailShow,
+                    onBack: { selectedShowForDetail = nil }
+                )
+                .environmentObject(viewModel)
+            } else {
+                Picker("", selection: $selectedTab) {
+                    Text("My Shows").tag("shows")
+                    Text("Search").tag("search")
                 }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                
+                Divider()
+                Spacer().frame(height: 1)
+
+                VStack(spacing: 0) {
+                    if selectedTab == "shows" {
+                        BookmarksView(onSelectShow: { show in
+                            selectedShowForDetail = show
+                        })
+                        .environmentObject(viewModel)
+                    } else {
+                        SearchView(onSelectShow: { show in
+                            selectedShowForDetail = show
+                        })
+                        .environmentObject(viewModel)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

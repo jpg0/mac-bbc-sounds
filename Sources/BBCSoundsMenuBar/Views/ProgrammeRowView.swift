@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProgrammeRowView: View {
     let programme: Programme
+    var onSelectShow: ((Programme) -> Void)? = nil
     @EnvironmentObject var viewModel: AppViewModel
 
     @State private var isExpanded = false
@@ -24,11 +25,36 @@ struct ProgrammeRowView: View {
         return session.time / dur
     }
 
+    private var unplayedCount: Int? {
+        guard programme.type == "brand" || programme.type == "series" else { return nil }
+        guard let episodes = viewModel.brandEpisodes[programme.id], !episodes.isEmpty else { return nil }
+        return episodes.filter { ep in
+            let pid = ep.resolvedPID ?? ep.id
+            guard let session = viewModel.playbackHistory[pid],
+                  let dur = session.duration, dur > 0 else {
+                return true
+            }
+            return (session.time / dur) < 0.9
+        }.count
+    }
+
+    private var hasUnplayedLatest: Bool {
+        guard let latest = viewModel.brandLatestEpisodes[programme.id] else { return false }
+        if let session = viewModel.playbackHistory[latest.vpid], let dur = session.duration, dur > 0 {
+            return (session.time / dur) < 0.9
+        }
+        return true
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
-                Task {
-                    await viewModel.playProgramme(programme)
+                if let onSelect = onSelectShow, (programme.type == "brand" || programme.type == "series") {
+                    onSelect(programme)
+                } else {
+                    Task {
+                        await viewModel.playProgramme(programme)
+                    }
                 }
             } label: {
                 HStack(alignment: .top, spacing: 8) {
@@ -51,7 +77,7 @@ struct ProgrammeRowView: View {
                         
                         if isCurrentlyPlaying {
                             Image(systemName: "speaker.wave.2.fill")
-                                .foregroundColor(.red)
+                                .foregroundColor(.accentColor)
                                 .font(.caption)
                         }
                         
@@ -73,7 +99,7 @@ struct ProgrammeRowView: View {
                                             Rectangle()
                                                 .fill(Color.gray.opacity(0.3))
                                             Rectangle()
-                                                .fill(Color.red)
+                                                .fill(Color.accentColor)
                                                 .frame(width: geo.size.width * progress)
                                         }
                                     }
@@ -99,13 +125,45 @@ struct ProgrammeRowView: View {
                             }
                             
                             if programme.type == "brand" {
-                                Text("Show")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Color.blue.opacity(0.15))
-                                    .foregroundColor(.blue)
-                                    .cornerRadius(3)
+                                if let count = unplayedCount {
+                                    if count > 0 {
+                                        Text("\(count) unplayed")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1)
+                                            .background(Color.accentColor.opacity(0.15))
+                                            .foregroundColor(.accentColor)
+                                            .cornerRadius(8)
+                                    } else {
+                                        HStack(spacing: 2) {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 8, weight: .bold))
+                                            Text("Played")
+                                                .font(.system(size: 9, weight: .medium))
+                                        }
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(Color.secondary.opacity(0.12))
+                                        .foregroundColor(.secondary)
+                                        .cornerRadius(8)
+                                    }
+                                } else if hasUnplayedLatest {
+                                    Text("New")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 1)
+                                        .background(Color.accentColor.opacity(0.15))
+                                        .foregroundColor(.accentColor)
+                                        .cornerRadius(8)
+                                } else {
+                                    Text("Show")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.blue.opacity(0.15))
+                                        .foregroundColor(.blue)
+                                        .cornerRadius(3)
+                                }
                             }
                         }
 
@@ -164,26 +222,50 @@ struct ProgrammeRowView: View {
                     
                     Spacer()
                     
-                    if programme.type == "brand" {
+                    if programme.type == "brand" || programme.type == "series" {
                         Button {
                             viewModel.toggleBookmark(programme)
                         } label: {
                             Image(systemName: viewModel.isBookmarked(programme) ? "bookmark.fill" : "bookmark")
                                 .font(.system(size: 13))
-                                .foregroundColor(viewModel.isBookmarked(programme) ? .blue : .secondary)
-                                .padding(8)
+                                .foregroundColor(viewModel.isBookmarked(programme) ? .accentColor : .secondary)
+                                .padding(6)
                         }
                         .buttonStyle(.plain)
                         
-                        Button {
-                            isExpanded.toggle()
-                        } label: {
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(.secondary)
-                                .padding(8)
+                        if let onSelect = onSelectShow {
+                            Button {
+                                Task {
+                                    await viewModel.playProgramme(programme)
+                                }
+                            } label: {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(.accentColor)
+                                    .padding(4)
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button {
+                                onSelect(programme)
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.secondary.opacity(0.6))
+                                    .padding(4)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button {
+                                isExpanded.toggle()
+                            } label: {
+                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(8)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
                 .contentShape(Rectangle())
@@ -233,6 +315,11 @@ struct ProgrammeRowView: View {
                 }
             }
         }
+        .onAppear {
+            if (programme.type == "brand" || programme.type == "series") && viewModel.brandEpisodes[programme.id] == nil {
+                viewModel.loadEpisodes(for: programme.id)
+            }
+        }
     }
 }
 
@@ -266,7 +353,7 @@ struct EpisodeRowView: View {
                 ZStack {
                     if isCurrentlyPlaying {
                         Image(systemName: "speaker.wave.2.fill")
-                            .foregroundColor(.red)
+                            .foregroundColor(.accentColor)
                             .font(.caption)
                     } else {
                         Image(systemName: "play.fill")
@@ -291,7 +378,7 @@ struct EpisodeRowView: View {
                                         Rectangle()
                                             .fill(Color.gray.opacity(0.3))
                                         Rectangle()
-                                            .fill(Color.red)
+                                            .fill(Color.accentColor)
                                             .frame(width: geo.size.width * progress)
                                     }
                                 }

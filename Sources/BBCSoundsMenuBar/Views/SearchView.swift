@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SearchView: View {
+    var onSelectShow: ((Programme) -> Void)? = nil
     @EnvironmentObject var viewModel: AppViewModel
     @FocusState private var isSearchFocused: Bool
 
@@ -10,7 +11,7 @@ struct SearchView: View {
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
-                TextField("Search BBC Radio...", text: $viewModel.searchQuery)
+                TextField("Search BBC Radio & Shows...", text: $viewModel.searchQuery)
                     .focused($isSearchFocused)
                     .onChange(of: viewModel.searchQuery) { _ in
                         viewModel.onSearchQueryChanged()
@@ -45,7 +46,7 @@ struct SearchView: View {
             // Results / empty states
             if !viewModel.searchResults.isEmpty {
                 List(viewModel.searchResults) { programme in
-                    ProgrammeRowView(programme: programme)
+                    ProgrammeRowView(programme: programme, onSelectShow: onSelectShow)
                         .environmentObject(viewModel)
                         .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                 }
