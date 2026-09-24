@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 class FocusablePanel: NSPanel {
     override var canBecomeKey: Bool { return true }
@@ -11,10 +12,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var panel: NSPanel!
     var marqueeView: MacMarqueeView!
+    var equalizerAnimator = EqualizerAnimator()
     let viewModel = AppViewModel()
     
-    // We must hold onto this so the sink doesn't instantly deallocate
-    private var marqueeTextCancellable: Any?
+    private var cancellables = Set<AnyCancellable>()
     private var eventMonitor: Any?
     private var localEventMonitor: Any?
 
@@ -73,28 +74,49 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.action = #selector(togglePanel(_:))
         button.target = self
         
-        // 4. Listen to ViewModel to show/hide the Marquee
-        let radioImage = NSImage(systemSymbolName: "radio", accessibilityDescription: "BBC Sounds")
-        radioImage?.isTemplate = true
-        button.image = radioImage
+        // 4. Listen to ViewModel to show/hide the Marquee and update Equalizer
+        button.image = equalizerAnimator.defaultImage
+        button.title = ""
         
-        marqueeTextCancellable = viewModel.$marqueeText
+        viewModel.$marqueeText
             .receive(on: RunLoop.main)
-            .sink { [weak self] text in
-                guard let self = self else { return }
-                
-                if let text = text {
-                    self.statusItem.button?.image = nil
-                    self.marqueeView.text = text
-                    self.marqueeView.isHidden = false
-                    self.statusItem.length = 80 // Expand
-                    self.marqueeView.frame = NSRect(x: 0, y: 0, width: 80, height: 22)
-                } else {
-                    self.statusItem.button?.image = radioImage
-                    self.marqueeView.isHidden = true
-                    self.statusItem.length = NSStatusItem.variableLength // Collapse back to default width
-                }
+            .sink { [weak self] _ in
+                self?.updateStatusItemAppearance()
             }
+            .store(in: &cancellables)
+            
+        viewModel.player.$isPlaying
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateStatusItemAppearance()
+            }
+            .store(in: &cancellables)
+            
+        updateStatusItemAppearance()
+    }
+
+    func updateStatusItemAppearance() {
+        guard let button = statusItem.button else { return }
+        
+        if let marquee = viewModel.marqueeText {
+            equalizerAnimator.stop(button: button)
+            button.image = nil
+            button.title = ""
+            marqueeView.text = marquee
+            marqueeView.isHidden = false
+            statusItem.length = 80
+            marqueeView.frame = NSRect(x: 0, y: 0, width: 80, height: button.bounds.height > 0 ? button.bounds.height : 22)
+        } else {
+            marqueeView.isHidden = true
+            button.title = ""
+            statusItem.length = NSStatusItem.variableLength
+            
+            if viewModel.player.isPlaying {
+                equalizerAnimator.start(button: button)
+            } else {
+                equalizerAnimator.stop(button: button)
+            }
+        }
     }
 
     @objc func togglePanel(_ sender: AnyObject?) {
