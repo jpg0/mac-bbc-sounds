@@ -219,7 +219,7 @@ struct SpeakerPickerPopover: View {
             HStack(spacing: 10) {
                 Image(systemName: item.icon)
                     .font(.system(size: 16))
-                    .foregroundColor(item.isActive ? .blue : .primary)
+                    .foregroundColor(item.isActive ? .accentColor : .primary)
                     .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -266,14 +266,14 @@ struct SpeakerPickerPopover: View {
                         Text("\(vol)%")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                     }
-                    .foregroundColor(item.isActive ? .blue : .secondary)
+                    .foregroundColor(item.isActive ? .accentColor : .secondary)
                 }
 
                 // Active checkmark
                 if item.isActive {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(.blue)
+                        .foregroundColor(.accentColor)
                         .frame(width: 14)
                 } else {
                     Spacer().frame(width: 14)
@@ -283,7 +283,7 @@ struct SpeakerPickerPopover: View {
             .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(item.isActive ? Color.blue.opacity(0.1) : (hoveredTargetId == item.id ? Color.primary.opacity(0.06) : Color.clear))
+                    .fill(item.isActive ? Color.accentColor.opacity(0.12) : (hoveredTargetId == item.id ? Color.primary.opacity(0.06) : Color.clear))
             )
             .contentShape(Rectangle())
         }

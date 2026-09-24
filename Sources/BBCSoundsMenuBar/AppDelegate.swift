@@ -18,6 +18,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var eventMonitor: Any?
     private var localEventMonitor: Any?
+    var scrollMonitor: Any?
+    var localScrollMonitor: Any?
+    var rightClickMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 1. Setup Status Item
@@ -93,6 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
             
         updateStatusItemAppearance()
+        setupStatusItemInteractions()
     }
 
     func updateStatusItemAppearance() {
@@ -120,6 +124,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePanel(_ sender: AnyObject?) {
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp || event.type == .rightMouseDown {
+            showContextMenu(event: event)
+            return
+        }
+
         if panel.isVisible {
             hidePanel()
         } else {

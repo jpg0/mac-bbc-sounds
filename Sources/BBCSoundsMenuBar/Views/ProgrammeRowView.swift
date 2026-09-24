@@ -160,8 +160,8 @@ struct ProgrammeRowView: View {
                                         .font(.system(size: 9, weight: .bold))
                                         .padding(.horizontal, 4)
                                         .padding(.vertical, 1)
-                                        .background(Color.blue.opacity(0.15))
-                                        .foregroundColor(.blue)
+                                        .background(Color.accentColor.opacity(0.15))
+                                        .foregroundColor(.accentColor)
                                         .cornerRadius(3)
                                 }
                             }

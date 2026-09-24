@@ -57,7 +57,7 @@ struct TrackRow: View {
                     // Time / Offset
                     Text(formatOffset(segment.startTime))
                         .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(segment.isNowPlaying ? .red : .secondary)
+                        .foregroundColor(segment.isNowPlaying ? .accentColor : .secondary)
                         .frame(width: 32, alignment: .trailing)
                     
                     VStack(alignment: .leading, spacing: 1) {
@@ -76,7 +76,7 @@ struct TrackRow: View {
                     
                     if segment.isNowPlaying {
                         Image(systemName: "play.circle.fill")
-                            .foregroundColor(.red)
+                            .foregroundColor(.accentColor)
                             .font(.caption)
                     }
                 }
@@ -97,7 +97,7 @@ struct TrackRow: View {
             .help("Search on Spotify")
             .padding(.trailing, 4)
         }
-        .background(segment.isNowPlaying ? Color.red.opacity(0.05) : Color.clear)
+        .background(segment.isNowPlaying ? Color.accentColor.opacity(0.08) : Color.clear)
     }
     
     private func formatOffset(_ seconds: Int) -> String {

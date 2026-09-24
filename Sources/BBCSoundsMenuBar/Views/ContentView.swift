@@ -103,9 +103,15 @@ struct ContentView: View {
             if let detailShow = selectedShowForDetail {
                 ShowDetailView(
                     programme: detailShow,
-                    onBack: { selectedShowForDetail = nil }
+                    onBack: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedShowForDetail = nil
+                        }
+                    }
                 )
                 .environmentObject(viewModel)
+                .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
+                                        removal: .move(edge: .trailing).combined(with: .opacity)))
             } else {
                 Picker("", selection: $selectedTab) {
                     Text("My Shows").tag("shows")
@@ -121,17 +127,22 @@ struct ContentView: View {
                 VStack(spacing: 0) {
                     if selectedTab == "shows" {
                         BookmarksView(onSelectShow: { show in
-                            selectedShowForDetail = show
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                selectedShowForDetail = show
+                            }
                         })
                         .environmentObject(viewModel)
                     } else {
                         SearchView(onSelectShow: { show in
-                            selectedShowForDetail = show
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                selectedShowForDetail = show
+                            }
                         })
                         .environmentObject(viewModel)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

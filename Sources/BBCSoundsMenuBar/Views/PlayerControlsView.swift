@@ -76,10 +76,10 @@ struct PlayerControlsView: View {
                                     .font(.system(size: 10, weight: .medium))
                                     .lineLimit(1)
                             }
-                            .foregroundColor(.blue)
+                            .foregroundColor(.accentColor)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.12))
+                            .background(Color.accentColor.opacity(0.12))
                             .cornerRadius(4)
                             .padding(.top, 1)
                         }
@@ -108,10 +108,10 @@ struct PlayerControlsView: View {
                                     .font(.system(size: 10, weight: .medium))
                                     .lineLimit(1)
                             }
-                            .foregroundColor(.blue)
+                            .foregroundColor(.accentColor)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.12))
+                            .background(Color.accentColor.opacity(0.12))
                             .cornerRadius(4)
                             .padding(.top, 1)
                         }
@@ -153,7 +153,7 @@ struct PlayerControlsView: View {
                     } label: {
                         Image(systemName: player.outputTarget.isSonos ? "hifispeaker.2.fill" : "airplayaudio")
                             .font(.system(size: 14))
-                            .foregroundColor(player.outputTarget.isSonos ? .blue : .secondary)
+                            .foregroundColor(player.outputTarget.isSonos ? .accentColor : .secondary)
                     }
                     .buttonStyle(.plain)
                     .help(player.outputTarget.isSonos ? "Streaming to \(player.outputTarget.displayName)" : "Audio Output")
