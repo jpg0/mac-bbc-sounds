@@ -22,23 +22,15 @@ struct LiveStationsCarouselView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Header Row: Live Radio • Quick Tune
-            HStack {
-                HStack(spacing: 5) {
-                    Text("LIVE RADIO")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
+            // Header Row: Live Radio
+            HStack(spacing: 5) {
+                Text("LIVE RADIO")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
 
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 5, height: 5)
-                }
-
-                Spacer()
-
-                Text("Quick Tune")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.7))
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 5, height: 5)
             }
             .padding(.horizontal, 2)
 
