@@ -78,11 +78,26 @@ struct ProxySettingsView: View {
             .buttonStyle(.bordered)
             .disabled(viewModel.isSearching)
 
-            Button("Done") {
-                dismiss()
+            Divider().padding(.vertical, 4)
+
+            HStack {
+                Button(role: .destructive) {
+                    NSApplication.shared.terminate(nil)
+                } label: {
+                    Text("Quit BBC Sounds")
+                        .foregroundColor(.red)
+                        .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
             }
-            .keyboardShortcut(.defaultAction)
-            .padding(.top, 8)
+            .padding(.top, 4)
         }
         .padding(20)
         .frame(width: 320)

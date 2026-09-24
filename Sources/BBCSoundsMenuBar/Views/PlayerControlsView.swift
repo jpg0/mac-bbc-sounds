@@ -4,32 +4,37 @@ struct PlayerControlsView: View {
     @ObservedObject var player: PlayerService
     @Environment(\.colorScheme) var colorScheme
     @State private var showingSpeakerPicker = false
+    @State private var isTracklistExpanded = false
+    @State private var preMuteVolume: Float = 0.5
 
     private var nowPlayingTrack: Segment? {
         player.currentTracks.first(where: { $0.isNowPlaying })
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Header: Artwork, Metadata, and Stop
-            HStack(alignment: .center, spacing: 12) {
+        VStack(spacing: 8) {
+            // Header: Artwork, Metadata, Action Buttons
+            HStack(alignment: .center, spacing: 10) {
                 // Square Artwork
                 if let image = player.currentArtwork {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 54, height: 54)
+                        .frame(width: 52, height: 52)
                         .cornerRadius(6)
-                        .shadow(color: .black.opacity(0.1), radius: 2)
+                        .shadow(color: .black.opacity(0.12), radius: 2, y: 1)
                 } else {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.1))
-                        .frame(width: 54, height: 54)
-                        .cornerRadius(6)
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.secondary.opacity(0.12))
+                        .frame(width: 52, height: 52)
                         .overlay {
-                             if player.isLoading {
-                                 ProgressView().scaleEffect(0.6)
-                             }
+                            if player.isLoading {
+                                ProgressView().scaleEffect(0.6)
+                            } else {
+                                Image(systemName: "music.note")
+                                    .font(.system(size: 18))
+                                    .foregroundColor(.secondary)
+                            }
                         }
                 }
 
@@ -39,18 +44,28 @@ struct PlayerControlsView: View {
                         HStack(alignment: .center, spacing: 4) {
                             Text(programme.name)
                                 .font(.system(size: 13, weight: .semibold))
-                                .lineLimit(2)
+                                .lineLimit(1)
                             
                             if programme.isLive {
-                                Image(systemName: "antenna.radiowaves.left.and.right")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.red)
+                                HStack(spacing: 3) {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 4, height: 4)
+                                    Text("LIVE")
+                                        .font(.system(size: 8, weight: .black))
+                                        .foregroundColor(.red)
+                                }
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.red.opacity(0.12))
+                                .cornerRadius(3)
                             }
                         }
                         
                         Text(programme.channel)
                             .font(.caption)
                             .foregroundColor(.secondary)
+                            .lineLimit(1)
 
                         // Sonos Output Status Indicator
                         if case .sonos(let device) = player.outputTarget {
@@ -75,7 +90,7 @@ struct PlayerControlsView: View {
                                     .font(.system(size: 9))
                                 Text("\(track.title) — \(track.artist)")
                                     .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(.red)
+                                    .foregroundColor(.accentColor)
                                     .lineLimit(1)
                             }
                             .padding(.top, 1)
@@ -105,26 +120,39 @@ struct PlayerControlsView: View {
                 
                 Spacer()
                 
-                // Tracklist Toggle, Speaker Picker & Stop Button
-                HStack(spacing: 12) {
+                // Actions: Spotify, Tracklist Toggle & Speaker Picker
+                HStack(spacing: 10) {
                     if let track = nowPlayingTrack {
                         Button {
                             player.openInSpotify(track: track)
                         } label: {
                             Image(systemName: "plus.circle")
-                                .font(.title2)
+                                .font(.system(size: 15))
                                 .foregroundColor(.green)
                         }
                         .buttonStyle(.plain)
                         .help("Search on Spotify")
                     }
 
+                    // Tracklist Drawer Toggle Button
+                    Button {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            isTracklistExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "music.note.list")
+                            .font(.system(size: 14))
+                            .foregroundColor(isTracklistExpanded ? .accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle Tracklist & Chapters")
+
                     // Speaker Route Button
                     Button {
                         showingSpeakerPicker.toggle()
                     } label: {
                         Image(systemName: player.outputTarget.isSonos ? "hifispeaker.2.fill" : "airplayaudio")
-                            .font(.system(size: 15))
+                            .font(.system(size: 14))
                             .foregroundColor(player.outputTarget.isSonos ? .blue : .secondary)
                     }
                     .buttonStyle(.plain)
@@ -132,23 +160,13 @@ struct PlayerControlsView: View {
                     .popover(isPresented: $showingSpeakerPicker, arrowEdge: .bottom) {
                         SpeakerPickerPopover(player: player)
                     }
-
-                    Button {
-                        player.stop()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.secondary.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop Playback")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
+            .padding(.horizontal, 4)
+            .padding(.top, 2)
 
             // Timeline / Scrubber
-            VStack(spacing: 4) {
+            VStack(spacing: 3) {
                 Slider(
                     value: Binding(
                         get: { player.currentTime },
@@ -156,85 +174,113 @@ struct PlayerControlsView: View {
                     ),
                     in: 0...max(player.duration, 1)
                 )
-                .accentColor(.red)
+                .accentColor(.accentColor)
                 .controlSize(.small)
                 
                 HStack {
                     Text(formatTime(player.currentTime))
                     Spacer()
-                    if player.duration > 0 {
+                    if let prog = player.currentProgramme, prog.isLive {
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 4, height: 4)
+                            Text("LIVE")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.red)
+                        }
+                    } else if player.duration > 0 {
                         Text(formatTime(player.duration))
                     }
                 }
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 4)
 
-            // Transport & Volume Bar
-            HStack(spacing: 0) {
-                // Centered Transport Controls
-                Spacer()
-                HStack(spacing: 20) {
+            // Transport Row: Centered 5-Button Controls + Squeezed Right-Aligned Volume
+            ZStack(alignment: .trailing) {
+                // True-Centered Transport Cluster
+                HStack(spacing: 16) {
+                    // Skip Back / Previous Track
                     Button {
                         player.skipToPreviousTrack()
                     } label: {
                         Image(systemName: "backward.end.fill")
-                            .font(.system(size: 14))
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .disabled(player.currentTracks.isEmpty)
-                    .help("Previous Track")
+                    .help("Previous Track (Cmd+Left)")
 
+                    // Rewind 15s
                     Button {
                         player.seek(by: -15)
                     } label: {
                         Image(systemName: "gobackward.15")
-                            .font(.title3)
+                            .font(.system(size: 15))
                     }
                     .buttonStyle(.plain)
+                    .foregroundColor(.primary)
                     .keyboardShortcut(.leftArrow, modifiers: [])
+                    .help("Rewind 15 seconds")
 
+                    // Centered Play / Pause Hero Button
                     Button {
                         player.isPlaying ? player.pause() : player.resume()
                     } label: {
                         Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 28))
-                            .frame(width: 32)
+                            .font(.system(size: 26))
+                            .frame(width: 32, height: 32)
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.primary)
                     .keyboardShortcut(.space, modifiers: [])
-                    
+                    .help(player.isPlaying ? "Pause" : "Play")
+
+                    // Forward 15s
                     Button {
                         player.seek(by: 15)
                     } label: {
                         Image(systemName: "goforward.15")
-                            .font(.title3)
+                            .font(.system(size: 15))
                     }
                     .buttonStyle(.plain)
+                    .foregroundColor(.primary)
                     .keyboardShortcut(.rightArrow, modifiers: [])
+                    .help("Forward 15 seconds")
 
+                    // Skip Forward / Next Track
                     Button {
                         player.skipToNextTrack()
                     } label: {
                         Image(systemName: "forward.end.fill")
-                            .font(.system(size: 14))
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                     .foregroundColor(.secondary)
                     .disabled(player.currentTracks.isEmpty)
-                    .help("Next Track")
+                    .help("Next Track (Cmd+Right)")
                 }
-                Spacer()
-                
-                // Compact Volume Control
-                HStack(spacing: 6) {
-                    Image(systemName: player.volume == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                    
+                .frame(maxWidth: .infinity, alignment: .center)
+
+                // Squeezed Volume Slider on the Right
+                HStack(spacing: 4) {
+                    Button {
+                        if player.volume > 0 {
+                            preMuteVolume = player.volume
+                            player.setVolume(0)
+                        } else {
+                            player.setVolume(preMuteVolume > 0 ? preMuteVolume : 0.5)
+                        }
+                    } label: {
+                        Image(systemName: player.volume == 0 ? "speaker.slash.fill" : "speaker.wave.1.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+
                     Slider(
                         value: Binding(
                             get: { Double(player.volume) },
@@ -242,15 +288,68 @@ struct PlayerControlsView: View {
                         ),
                         in: 0...1
                     )
-                    .frame(width: 60)
+                    .frame(width: 58)
                     .controlSize(.mini)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 4)
+            .padding(.top, 2)
+            .padding(.bottom, 2)
 
+            // Contextual Tracklist Drawer
+            if isTracklistExpanded {
+                VStack(alignment: .leading, spacing: 4) {
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    HStack {
+                        Text("TRACKLIST")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(player.currentTracks.count) tracks")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 4)
+
+                    if player.currentTracks.isEmpty {
+                        Text("No track segments reported for this broadcast.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 4)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(player.currentTracks) { segment in
+                                    TrackRow(
+                                        segment: segment,
+                                        onSelect: { player.skipToTrack(segment) },
+                                        onSpotify: { player.openInSpotify(track: segment) }
+                                    )
+                                    if segment != player.currentTracks.last {
+                                        Divider().padding(.leading, 40)
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 140)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.3))
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(NSColor.separatorColor).opacity(0.4), lineWidth: 1)
+        )
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
     }
-
 }

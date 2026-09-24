@@ -22,22 +22,13 @@ struct ContentView: View {
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 8)
                 .popover(isPresented: $showingSettings) {
                     ProxySettingsView()
                         .environmentObject(viewModel)
                 }
-
-                Button {
-                    NSApplication.shared.terminate(nil)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 4)
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
             .padding(.bottom, 8)
 
             Divider()
@@ -90,7 +81,6 @@ struct ContentView: View {
             if viewModel.player.currentProgramme != nil || viewModel.isLoadingStream {
                 PlayerControlsView(player: viewModel.player)
                     .environmentObject(viewModel)
-                Divider()
             }
 
             // Error message
