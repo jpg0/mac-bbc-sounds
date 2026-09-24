@@ -119,10 +119,8 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                
-                Divider()
-                Spacer().frame(height: 1)
+                .padding(.top, 6)
+                .padding(.bottom, 2)
 
                 VStack(spacing: 0) {
                     if selectedTab == "shows" {

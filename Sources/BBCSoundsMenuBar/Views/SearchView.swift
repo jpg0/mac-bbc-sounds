@@ -8,18 +8,22 @@ struct SearchView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Search input row
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
-                TextField("Search BBC Radio & Shows...", text: $viewModel.searchQuery)
+                    .font(.system(size: 13))
+
+                TextField("Search BBC shows, podcasts, artists...", text: $viewModel.searchQuery)
                     .focused($isSearchFocused)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
                     .onChange(of: viewModel.searchQuery) { _ in
                         viewModel.onSearchQueryChanged()
                     }
                 
                 if viewModel.isSearching {
                     ProgressView()
-                        .scaleEffect(0.7)
+                        .scaleEffect(0.65)
                 }
                 
                 if !viewModel.searchQuery.isEmpty {
@@ -27,43 +31,72 @@ struct SearchView: View {
                         viewModel.searchQuery = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.secondary.opacity(0.8))
+                            .font(.system(size: 12))
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .contentShape(Rectangle())
-            .onTapGesture {
-                isSearchFocused = true
-            }
-            .cornerRadius(8)
-            .padding(8)
-
-            Divider()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.primary.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
 
             // Results / empty states
             if !viewModel.searchResults.isEmpty {
-                List(viewModel.searchResults) { programme in
-                    ProgrammeRowView(programme: programme, onSelectShow: onSelectShow)
-                        .environmentObject(viewModel)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(viewModel.searchResults) { programme in
+                            if programme.type == "brand" || programme.type == "series" {
+                                ShowCardView(
+                                    programme: programme,
+                                    onSelect: { onSelectShow?(programme) },
+                                    onPlay: {
+                                        Task {
+                                            await viewModel.playProgramme(programme)
+                                        }
+                                    }
+                                )
+                                .environmentObject(viewModel)
+                            } else {
+                                EpisodeCardItemView(
+                                    episode: programme,
+                                    parentArtworkURL: programme.artworkURL
+                                )
+                                .environmentObject(viewModel)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 12)
                 }
-                .listStyle(.plain)
             } else if viewModel.searchQuery.isEmpty {
                 Spacer()
                 VStack(spacing: 8) {
-                    Image(systemName: "radio")
-                        .font(.largeTitle)
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 32))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("Search BBC Sounds")
+                        .font(.headline)
                         .foregroundColor(.secondary)
-                    Text("Search for BBC Radio shows")
-                        .foregroundColor(.secondary)
+                    Text("Find radio stations, podcasts, and past broadcasts across the entire BBC library.")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
                 }
                 Spacer()
             } else {
-                // If we are searching or have a query but no results yet, 
-                // stay empty to keep the search bar at the top.
                 Spacer()
             }
         }

@@ -4,46 +4,66 @@ struct LiveStation: Identifiable {
     let id: String
     let badge: String
     let name: String
+    let badgeColor: Color
 }
 
 struct LiveStationsCarouselView: View {
     @EnvironmentObject var viewModel: AppViewModel
 
     private let stations: [LiveStation] = [
-        LiveStation(id: "bbc_radio_one", badge: "1", name: "Radio 1"),
-        LiveStation(id: "bbc_radio_two", badge: "2", name: "Radio 2"),
-        LiveStation(id: "bbc_radio_fourfm", badge: "4", name: "Radio 4"),
-        LiveStation(id: "bbc_6music", badge: "6M", name: "6 Music"),
-        LiveStation(id: "bbc_radio_five_live", badge: "5L", name: "5 Live"),
-        LiveStation(id: "bbc_world_service", badge: "WS", name: "World Service"),
-        LiveStation(id: "bbc_1xtra", badge: "1X", name: "1Xtra")
+        LiveStation(id: "bbc_radio_one", badge: "1", name: "Radio 1", badgeColor: Color(red: 0.85, green: 0.05, blue: 0.45)),
+        LiveStation(id: "bbc_radio_two", badge: "2", name: "Radio 2", badgeColor: Color(red: 0.88, green: 0.48, blue: 0.05)),
+        LiveStation(id: "bbc_radio_fourfm", badge: "4", name: "Radio 4", badgeColor: Color(red: 0.12, green: 0.35, blue: 0.85)),
+        LiveStation(id: "bbc_6music", badge: "6M", name: "6 Music", badgeColor: Color(red: 0.05, green: 0.58, blue: 0.55)),
+        LiveStation(id: "bbc_radio_five_live", badge: "5L", name: "5 Live", badgeColor: Color(red: 0.75, green: 0.12, blue: 0.12)),
+        LiveStation(id: "bbc_world_service", badge: "WS", name: "World Service", badgeColor: Color(red: 0.65, green: 0.10, blue: 0.10)),
+        LiveStation(id: "bbc_1xtra", badge: "1X", name: "1Xtra", badgeColor: Color(red: 0.92, green: 0.38, blue: 0.05))
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text("LIVE RADIO")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+            // Header Row: Live Radio • Quick Tune
+            HStack {
+                HStack(spacing: 5) {
+                    Text("LIVE RADIO")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
 
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 5, height: 5)
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 5, height: 5)
+                }
 
                 Spacer()
-            }
-            .padding(.horizontal, 12)
 
+                Text("Quick Tune")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 2)
+
+            // Stations Horizontal Carousel
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     ForEach(stations) { station in
                         stationButton(station)
                     }
                 }
-                .padding(.horizontal, 12)
+                .padding(.vertical, 1)
             }
         }
-        .padding(.vertical, 8)
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.primary.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
     }
 
     @ViewBuilder
@@ -69,36 +89,37 @@ struct LiveStationsCarouselView: View {
                 await viewModel.playProgramme(prog)
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 ZStack {
-                    Circle()
-                        .fill(isPlayingThisStation ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .frame(width: 24, height: 24)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(station.badgeColor)
+                        .frame(width: 20, height: 20)
 
                     if isPlayingThisStation {
                         Image(systemName: "speaker.wave.2.fill")
-                            .font(.system(size: 10))
+                            .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.white)
                     } else {
                         Text(station.badge)
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.primary)
+                            .font(.system(size: 9.5, weight: .black))
+                            .foregroundColor(.white)
                     }
                 }
 
                 Text(station.name)
-                    .font(.system(size: 11, weight: isPlayingThisStation ? .semibold : .regular))
+                    .font(.system(size: 10.5, weight: isPlayingThisStation ? .semibold : .medium))
                     .foregroundColor(isPlayingThisStation ? .primary : .secondary)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.leading, 3)
+            .padding(.trailing, 7)
+            .padding(.vertical, 3.5)
             .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(isPlayingThisStation ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06))
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isPlayingThisStation ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.04))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(isPlayingThisStation ? Color.accentColor.opacity(0.4) : Color.clear, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isPlayingThisStation ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.05), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

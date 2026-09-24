@@ -160,7 +160,7 @@ struct ShowDetailView: View {
                     } else {
                         LazyVStack(spacing: 6) {
                             ForEach(episodes) { ep in
-                                EpisodeRowView(episode: ep, parentArtworkURL: programme.artworkURL)
+                                EpisodeCardItemView(episode: ep, parentArtworkURL: programme.artworkURL)
                                     .environmentObject(viewModel)
                             }
                         }
