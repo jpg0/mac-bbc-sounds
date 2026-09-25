@@ -1,24 +1,29 @@
 import SwiftUI
 
-struct LiveStation: Identifiable {
+struct LiveStation: Identifiable, Equatable {
     let id: String
     let badge: String
     let name: String
     let badgeColor: Color
+
+    /// Core BBC live stations ordered by national audience usage / listenership (RAJAR)
+    static let defaultStations: [LiveStation] = [
+        LiveStation(id: "bbc_radio_two", badge: "2", name: "Radio 2", badgeColor: Color(red: 0.88, green: 0.48, blue: 0.05)),
+        LiveStation(id: "bbc_radio_fourfm", badge: "4", name: "Radio 4", badgeColor: Color(red: 0.12, green: 0.35, blue: 0.85)),
+        LiveStation(id: "bbc_radio_one", badge: "1", name: "Radio 1", badgeColor: Color(red: 0.85, green: 0.05, blue: 0.45)),
+        LiveStation(id: "bbc_radio_five_live", badge: "5L", name: "5 Live", badgeColor: Color(red: 0.75, green: 0.12, blue: 0.12)),
+        LiveStation(id: "bbc_6music", badge: "6M", name: "6 Music", badgeColor: Color(red: 0.05, green: 0.58, blue: 0.55)),
+        LiveStation(id: "bbc_world_service", badge: "WS", name: "World Service", badgeColor: Color(red: 0.65, green: 0.10, blue: 0.10)),
+        LiveStation(id: "bbc_1xtra", badge: "1X", name: "1Xtra", badgeColor: Color(red: 0.92, green: 0.38, blue: 0.05))
+    ]
 }
 
 struct LiveStationsCarouselView: View {
     @EnvironmentObject var viewModel: AppViewModel
 
-    private let stations: [LiveStation] = [
-        LiveStation(id: "bbc_radio_one", badge: "1", name: "Radio 1", badgeColor: Color(red: 0.85, green: 0.05, blue: 0.45)),
-        LiveStation(id: "bbc_radio_two", badge: "2", name: "Radio 2", badgeColor: Color(red: 0.88, green: 0.48, blue: 0.05)),
-        LiveStation(id: "bbc_radio_fourfm", badge: "4", name: "Radio 4", badgeColor: Color(red: 0.12, green: 0.35, blue: 0.85)),
-        LiveStation(id: "bbc_6music", badge: "6M", name: "6 Music", badgeColor: Color(red: 0.05, green: 0.58, blue: 0.55)),
-        LiveStation(id: "bbc_radio_five_live", badge: "5L", name: "5 Live", badgeColor: Color(red: 0.75, green: 0.12, blue: 0.12)),
-        LiveStation(id: "bbc_world_service", badge: "WS", name: "World Service", badgeColor: Color(red: 0.65, green: 0.10, blue: 0.10)),
-        LiveStation(id: "bbc_1xtra", badge: "1X", name: "1Xtra", badgeColor: Color(red: 0.92, green: 0.38, blue: 0.05))
-    ]
+    private var stations: [LiveStation] {
+        viewModel.sortLiveStations(LiveStation.defaultStations)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -42,6 +47,7 @@ struct LiveStationsCarouselView: View {
                     }
                 }
                 .padding(.vertical, 1)
+                .animation(.easeInOut(duration: 0.25), value: stations.map(\.id))
             }
         }
         .padding(8)

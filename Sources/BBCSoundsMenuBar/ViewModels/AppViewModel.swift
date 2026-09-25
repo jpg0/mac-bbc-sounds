@@ -20,6 +20,10 @@ class AppViewModel: ObservableObject {
     @Published var marqueeStartTime: Date? = nil
     @Published var playbackHistory: [String: PlaybackSession] = [:]
 
+    // Live Station Usage Tracking
+    @Published var stationUsageCounts: [String: Int] = [:]
+    @Published var stationLastPlayed: [String: Date] = [:]
+
     struct LatestEpisodeInfo: Codable, Equatable {
         let episodePID: String
         let vpid: String
@@ -103,6 +107,7 @@ class AppViewModel: ObservableObject {
         
         loadSavedSession()
         loadPlaybackHistory()
+        loadStationUsage()
         loadBookmarks()
         startBookmarkAutoRefreshTimer()
         
@@ -274,6 +279,10 @@ class AppViewModel: ObservableObject {
         resumeSession = nil // Clear resume prompt if we start something else
         isLoadingStream = true
         errorMessage = nil
+        if programme.isLive {
+            let stationID = (programme.id.hasPrefix("bbc_") || programme.id.contains("radio")) ? programme.id : (programme.resolvedPID ?? programme.id)
+            recordStationPlayback(stationID: stationID)
+        }
         do {
             var updatedProgramme = programme
             
@@ -287,17 +296,21 @@ class AppViewModel: ObservableObject {
                 updatedProgramme.durationInSeconds = fullProg.durationInSeconds
             }
             
-            player.play(url: url, programme: updatedProgramme)
-            
             // Auto-resume from history if available and not finished
-            if let history = playbackHistory[resolvedPID], history.time > 15 {
-                // If duration is missing or more than 30s left, resume. 
-                // Otherwise start from beginning (assume finished)
-                let remaining = (history.duration ?? Double(updatedProgramme.durationInSeconds)) - history.time
-                if remaining > 30 || history.duration == nil {
-                    player.seek(to: history.time)
-                    print("🔄 Auto-resuming \(programme.name) from \(Int(history.time))s")
+            let resumeTime: Double? = {
+                guard let history = playbackHistory[resolvedPID], history.time > 15 else { return nil }
+                let effectiveDur = updatedProgramme.effectiveDurationInSeconds
+                let totalDur = history.duration ?? (effectiveDur > 0 ? effectiveDur : nil)
+                if let dur = totalDur {
+                    let remaining = dur - history.time
+                    return remaining > 30 ? history.time : nil
                 }
+                return history.time
+            }()
+
+            player.play(url: url, programme: updatedProgramme, seekTo: resumeTime)
+            if let resume = resumeTime {
+                print("🔄 Auto-resuming \(programme.name) from \(Int(resume))s")
             }
         } catch {
             if case BBCSoundsError.programmeExpiredOrNotFound = error {
@@ -413,6 +426,45 @@ class AppViewModel: ObservableObject {
             }
         }
         self.playbackHistory = loadedHistory
+    }
+
+    func loadStationUsage() {
+        self.stationUsageCounts = UserDefaults.app.dictionary(forKey: "LiveStationUsageCounts") as? [String: Int] ?? [:]
+        let savedTimestamps = UserDefaults.app.dictionary(forKey: "LiveStationLastPlayed") as? [String: Double] ?? [:]
+        self.stationLastPlayed = savedTimestamps.compactMapValues { Date(timeIntervalSince1970: $0) }
+    }
+
+    func recordStationPlayback(stationID: String) {
+        let currentCount = stationUsageCounts[stationID] ?? 0
+        let newCount = currentCount + 1
+        stationUsageCounts[stationID] = newCount
+        let now = Date()
+        stationLastPlayed[stationID] = now
+        
+        UserDefaults.app.set(stationUsageCounts, forKey: "LiveStationUsageCounts")
+        var timestamps = UserDefaults.app.dictionary(forKey: "LiveStationLastPlayed") as? [String: Double] ?? [:]
+        timestamps[stationID] = now.timeIntervalSince1970
+        UserDefaults.app.set(timestamps, forKey: "LiveStationLastPlayed")
+    }
+
+    func sortLiveStations<T: Identifiable>(_ stations: [T]) -> [T] where T.ID == String {
+        stations.sorted { (stationA, stationB) -> Bool in
+            let countA = stationUsageCounts[stationA.id] ?? 0
+            let countB = stationUsageCounts[stationB.id] ?? 0
+            if countA != countB {
+                return countA > countB
+            }
+            
+            let dateA = stationLastPlayed[stationA.id] ?? Date.distantPast
+            let dateB = stationLastPlayed[stationB.id] ?? Date.distantPast
+            if dateA != dateB {
+                return dateA > dateB
+            }
+            
+            let indexA = stations.firstIndex(where: { $0.id == stationA.id }) ?? 0
+            let indexB = stations.firstIndex(where: { $0.id == stationB.id }) ?? 0
+            return indexA < indexB
+        }
     }
 
     func refreshCache() async {

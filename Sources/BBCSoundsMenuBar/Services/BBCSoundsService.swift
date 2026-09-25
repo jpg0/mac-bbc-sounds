@@ -125,6 +125,7 @@ actor BBCSoundsService {
                     firstBroadcast: nil,
                     artworkURL: artworkURL,
                     isLive: isLive,
+                    durationInSeconds: item.duration?.value ?? 0,
                     type: type,
                     releaseLabel: item.release?.label
                 ))
@@ -180,6 +181,7 @@ actor BBCSoundsService {
                 firstBroadcast: nil,
                 artworkURL: nil,
                 isLive: false,
+                durationInSeconds: item.duration?.value ?? 0,
                 type: "episode",
                 releaseLabel: item.release?.label
             )

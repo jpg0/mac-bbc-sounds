@@ -64,10 +64,10 @@ public final class SonosController: ObservableObject {
     @Published public private(set) var positionInfo: SonosPositionInfo = .zero
 
     /// Current playback elapsed time in seconds
-    @Published public private(set) var currentTime: TimeInterval = 0
+    @Published public internal(set) var currentTime: TimeInterval = 0
 
     /// Total track duration in seconds
-    @Published public private(set) var duration: TimeInterval = 0
+    @Published public internal(set) var duration: TimeInterval = 0
 
     /// Whether the background state polling task is active
     @Published public private(set) var isPolling: Bool = false
@@ -243,29 +243,41 @@ public final class SonosController: ObservableObject {
 
     // MARK: - AVTransport Actions
 
-    /// Converts an HTTP/HTTPS stream URL into a Sonos-compatible radio/stream URI
-    /// by replacing http:// or https:// with x-rincon-mp3radio://.
-    public static func sonosTransportURI(for url: URL) -> URL {
-        let str = url.absoluteString
-        if str.hasPrefix("x-rincon-mp3radio:") || str.hasPrefix("hls-radio:") {
+    /// Converts an HTTP/HTTPS stream URL into a Sonos-compatible transport URI.
+    /// Live streams require x-rincon-mp3radio:// so Sonos treats them as live radio broadcasts.
+    /// On-demand streams retain standard http:// or https:// so Sonos recognizes them as static HLS (hls-static://),
+    /// which allows track scrubbing and REL_TIME seeking.
+    public static func sonosTransportURI(for url: URL, isLive: Bool = true) -> URL {
+        if isLive {
+            let str = url.absoluteString
+            if str.hasPrefix("x-rincon-mp3radio:") || str.hasPrefix("hls-radio:") {
+                return url
+            }
+            if str.hasPrefix("http://") {
+                let replaced = "x-rincon-mp3radio://" + str.dropFirst("http://".count)
+                return URL(string: replaced) ?? url
+            }
+            if str.hasPrefix("https://") {
+                let replaced = "x-rincon-mp3radio://" + str.dropFirst("https://".count)
+                return URL(string: replaced) ?? url
+            }
+            return url
+        } else {
+            let str = url.absoluteString
+            if str.hasPrefix("x-rincon-mp3radio://") {
+                let replaced = "http://" + str.dropFirst("x-rincon-mp3radio://".count)
+                return URL(string: replaced) ?? url
+            }
             return url
         }
-        if str.hasPrefix("http://") {
-            let replaced = "x-rincon-mp3radio://" + str.dropFirst("http://".count)
-            return URL(string: replaced) ?? url
-        }
-        if str.hasPrefix("https://") {
-            let replaced = "x-rincon-mp3radio://" + str.dropFirst("https://".count)
-            return URL(string: replaced) ?? url
-        }
-        return url
     }
 
     /// Sets the playback URI and DIDL-Lite metadata on the target Sonos device.
     public func setAVTransportURI(url: URL, metadata: SonosMetadata? = nil) async throws {
-        let transportURL = Self.sonosTransportURI(for: url)
+        let isLive = metadata?.isLive ?? true
+        let transportURL = Self.sonosTransportURI(for: url, isLive: isLive)
         let escapedURI = SonosMetadata.escapeXML(transportURL.absoluteString)
-        let escapedDIDL = metadata.map { SonosMetadata.escapeXML($0.didlLiteXML()) } ?? ""
+        let escapedDIDL = metadata.map { SonosMetadata.escapeXML($0.didlLiteXML(uri: transportURL.absoluteString)) } ?? ""
 
         let actionBody = """
           <CurrentURI>\(escapedURI)</CurrentURI>
@@ -319,7 +331,9 @@ public final class SonosController: ObservableObject {
         let info = try SonosPositionInfoParser.parse(xmlData: data)
         self.positionInfo = info
         self.currentTime = info.trackRelTime
-        self.duration = info.trackDuration
+        if info.trackDuration > 0 {
+            self.duration = info.trackDuration
+        }
         return info
     }
 

@@ -6,6 +6,8 @@ struct PlayerControlsView: View {
     @State private var showingSpeakerPicker = false
     @State private var isTracklistExpanded = false
     @State private var preMuteVolume: Float = 0.5
+    @State private var isDraggingScrubber = false
+    @State private var scrubPosition: Double = 0
 
     private var nowPlayingTrack: Segment? {
         player.currentTracks.first(where: { $0.isNowPlaying })
@@ -169,16 +171,26 @@ struct PlayerControlsView: View {
             VStack(spacing: 3) {
                 Slider(
                     value: Binding(
-                        get: { player.currentTime },
-                        set: { player.seek(to: $0) }
+                        get: { isDraggingScrubber ? scrubPosition : player.currentTime },
+                        set: { scrubPosition = $0 }
                     ),
-                    in: 0...max(player.duration, 1)
+                    in: 0...max(player.duration, 1),
+                    onEditingChanged: { editing in
+                        if editing {
+                            isDraggingScrubber = true
+                            scrubPosition = player.currentTime
+                        } else {
+                            isDraggingScrubber = false
+                            player.seek(to: scrubPosition)
+                        }
+                    }
                 )
                 .accentColor(.accentColor)
                 .controlSize(.small)
+                .disabled(player.currentProgramme?.isLive == true || player.duration <= 0)
                 
                 HStack {
-                    Text(formatTime(player.currentTime))
+                    Text(formatTime(isDraggingScrubber ? scrubPosition : player.currentTime))
                     Spacer()
                     if let prog = player.currentProgramme, prog.isLive {
                         HStack(spacing: 3) {
@@ -222,9 +234,10 @@ struct PlayerControlsView: View {
                             .font(.system(size: 15))
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(.primary)
+                    .foregroundColor(player.currentProgramme?.isLive == true ? .secondary.opacity(0.4) : .primary)
+                    .disabled(player.currentProgramme?.isLive == true)
                     .keyboardShortcut(.leftArrow, modifiers: [])
-                    .help("Rewind 15 seconds")
+                    .help(player.currentProgramme?.isLive == true ? "Seeking unavailable on live radio" : "Rewind 15 seconds")
 
                     // Centered Play / Pause Hero Button
                     Button {
@@ -247,9 +260,10 @@ struct PlayerControlsView: View {
                             .font(.system(size: 15))
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(.primary)
+                    .foregroundColor(player.currentProgramme?.isLive == true ? .secondary.opacity(0.4) : .primary)
+                    .disabled(player.currentProgramme?.isLive == true)
                     .keyboardShortcut(.rightArrow, modifiers: [])
-                    .help("Forward 15 seconds")
+                    .help(player.currentProgramme?.isLive == true ? "Seeking unavailable on live radio" : "Forward 15 seconds")
 
                     // Skip Forward / Next Track
                     Button {

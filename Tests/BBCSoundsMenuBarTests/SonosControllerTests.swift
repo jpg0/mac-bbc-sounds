@@ -92,12 +92,13 @@ final class SonosControllerTests: XCTestCase {
         let metadata = SonosMetadata(
             title: "Breakfast Show",
             creator: "BBC Radio 1",
-            albumArtURI: "https://ichef.bbci.co.uk/images/ic/400x400/p0123.jpg"
+            albumArtURI: "https://ichef.bbci.co.uk/images/ic/400x400/p0123.jpg",
+            isLive: true
         )
 
         try await controller.setAVTransportURI(url: streamURL, metadata: metadata)
 
-        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL).absoluteString
+        let expectedTransportURI = SonosController.sonosTransportURI(for: streamURL, isLive: true).absoluteString
         XCTAssertEqual(mock.receivedURI, expectedTransportURI)
         let receivedDIDL = try XCTUnwrap(mock.receivedDIDLLite)
         XCTAssertTrue(receivedDIDL.contains("<dc:title>Breakfast Show</dc:title>"))
@@ -148,6 +149,41 @@ final class SonosControllerTests: XCTestCase {
         XCTAssertTrue(receivedDIDL.contains("<dc:title>Late Junction</dc:title>"))
         XCTAssertTrue(receivedDIDL.contains("<dc:creator>BBC Radio 3</dc:creator>"))
         XCTAssertTrue(receivedDIDL.contains("<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"))
+    }
+
+    func testSetAVTransportURIForOnDemandProgrammeRetainsHTTPAndIncludesProtocolInfo() async throws {
+        let mock = MockSonosDevice(roomName: "Den")
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_DEN",
+            name: "Den",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+        let streamURL = URL(string: "http://127.0.0.1:52800/playlist?url=https://aod.bbci.co.uk/show.m3u8")!
+        let prog = Programme(
+            id: "m001ondemand",
+            index: 0,
+            name: "Archive on 4",
+            channel: "BBC Radio 4",
+            duration: "01:00:00",
+            description: "Documentary",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: false
+        )
+
+        try await controller.setAVTransportURI(url: streamURL, programme: prog)
+
+        XCTAssertEqual(mock.receivedURI, streamURL.absoluteString, "On-demand URI should be standard HTTP, not x-rincon-mp3radio")
+        let receivedDIDL = try XCTUnwrap(mock.receivedDIDLLite)
+        XCTAssertTrue(receivedDIDL.contains("protocolInfo=\"http-get:*:application/vnd.apple.mpegurl:*\""))
+        XCTAssertTrue(receivedDIDL.contains("<upnp:class>object.item.audioItem.musicTrack</upnp:class>"))
     }
 
     func testPlaybackCommandsPlayPauseStopOnMockDevice() async throws {
@@ -296,6 +332,16 @@ final class SonosControllerTests: XCTestCase {
 
         let hlsPrefixed = URL(string: "hls-radio://some.host/stream.m3u8")!
         XCTAssertEqual(SonosController.sonosTransportURI(for: hlsPrefixed), hlsPrefixed)
+
+        // On-demand streams must not be converted to x-rincon-mp3radio
+        let onDemandHTTP = SonosController.sonosTransportURI(for: httpURL, isLive: false)
+        XCTAssertEqual(onDemandHTTP, httpURL)
+
+        let onDemandHTTPS = SonosController.sonosTransportURI(for: httpsURL, isLive: false)
+        XCTAssertEqual(onDemandHTTPS, httpsURL)
+
+        let onDemandStripped = SonosController.sonosTransportURI(for: URL(string: "x-rincon-mp3radio://192.168.1.50/show.m3u8")!, isLive: false)
+        XCTAssertEqual(onDemandStripped.absoluteString, "http://192.168.1.50/show.m3u8")
     }
 
     func testSonosError714Description() {

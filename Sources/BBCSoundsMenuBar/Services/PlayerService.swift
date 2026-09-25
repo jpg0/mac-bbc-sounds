@@ -53,6 +53,7 @@ class PlayerService: ObservableObject {
     private var handoffTask: Task<Void, Never>?
     private var sonosVolumeTask: Task<Void, Never>?
     private var pendingSonosVolume: Int?
+    private var pendingSeekTime: Double? = nil
 
     init(
         discoveryService: SonosDiscoveryService? = nil,
@@ -65,6 +66,7 @@ class PlayerService: ObservableObject {
         self.systemAudioService = sysAudio
         setupDiscoveryObservation()
         setupSystemAudioObservation()
+        setupRemoteCommandCenter()
     }
 
     private func setupSystemAudioObservation() {
@@ -123,7 +125,7 @@ class PlayerService: ObservableObject {
         print("🔊 [PlayerService] \(msg)")
     }
 
-    func play(url: URL, programme: Programme) {
+    func play(url: URL, programme: Programme, seekTo: Double? = nil) {
         player?.pause()
         player = nil
         statusObserver = nil
@@ -134,13 +136,21 @@ class PlayerService: ObservableObject {
         trackUpdateTask?.cancel()
         trackUpdateTask = nil
         playerError = nil
+        pendingSeekTime = nil
 
         self.currentStreamURL = url
         self.currentProgramme = programme
+        self.duration = programme.effectiveDurationInSeconds
+        if let target = seekTo, target > 0, !programme.isLive {
+            self.currentTime = target
+            self.pendingSeekTime = target
+        } else {
+            self.currentTime = 0
+        }
 
         switch outputTarget {
         case .thisMac:
-            setupLocalPlayer(url: url, programme: programme, seekTo: nil, autoPlay: true)
+            setupLocalPlayer(url: url, programme: programme, seekTo: seekTo, autoPlay: true)
 
         case .sonos(let device):
             let controller = sonosController ?? makeSonosController(for: device)
@@ -162,7 +172,7 @@ class PlayerService: ObservableObject {
                         controller: controller,
                         url: url,
                         programme: programme,
-                        seekTo: nil,
+                        seekTo: seekTo,
                         autoPlay: true
                     )
                 } catch {
@@ -233,8 +243,8 @@ class PlayerService: ObservableObject {
         self.player = p
 
         if let targetSeek = seekTo, targetSeek > 0, !programme.isLive {
-            p.seek(to: CMTime(seconds: targetSeek, preferredTimescale: 1))
             self.currentTime = targetSeek
+            self.pendingSeekTime = targetSeek
         }
 
         if autoPlay {
@@ -253,6 +263,7 @@ class PlayerService: ObservableObject {
         p.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1), queue: .main) { [weak self] time in
             Task { @MainActor in
                 guard let self = self, self.outputTarget.isMac else { return }
+                guard self.pendingSeekTime == nil else { return }
                 self.currentTime = time.seconds
                 self.updateNowPlayingTrack()
                 if abs(self.lastSavedTime - time.seconds) >= 5 {
@@ -270,6 +281,10 @@ class PlayerService: ObservableObject {
                     self.logToDebugFile("Status: Ready to Play")
                     self.isLoading = false
                     self.updateDuration(item: item)
+                    if let pending = self.pendingSeekTime {
+                        self.pendingSeekTime = nil
+                        self.seek(to: pending)
+                    }
                     self.setupRemoteCommandCenter()
                     self.updateNowPlaying()
                 } else if status == .failed {
@@ -332,23 +347,44 @@ class PlayerService: ObservableObject {
             throw error
         }
 
+        let effectiveDuration = programme.effectiveDurationInSeconds
+        self.duration = effectiveDuration
+        controller.duration = effectiveDuration
+        if let seekTo = seekTo, seekTo > 0, !programme.isLive {
+            self.currentTime = seekTo
+            controller.currentTime = seekTo
+        } else {
+            self.currentTime = 0
+            controller.currentTime = 0
+        }
+
         logToDebugFile("📡 Setting Sonos transport URI: \(deliveryURL)")
         do {
             try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
 
-            if let seekTime = seekTo, seekTime > 0, !programme.isLive {
-                do {
-                    logToDebugFile("⏩ Seeking Sonos to \(seekTime)s")
-                    try await controller.seek(to: seekTime)
-                    self.currentTime = seekTime
-                } catch {
-                    logToDebugFile("⚠️ Seek not supported for this stream on Sonos: \(error.localizedDescription)")
-                }
+            let needsSeek = (seekTo != nil && seekTo! > 0 && !programme.isLive)
+            let wasMuted = controller.isMuted
+
+            // Temporarily mute if we need to seek so that Sonos doesn't burst audio from 0:00 while seeking
+            if needsSeek && !wasMuted {
+                try? await controller.setMute(true)
             }
 
-            if autoPlay {
-                try await controller.play()
-                self.isPlaying = true
+            // Sonos AVTransport requires playback to start before seeking to a REL_TIME offset.
+            try await controller.play()
+            self.isPlaying = true
+
+            if let targetSeek = seekTo, targetSeek > 0, !programme.isLive {
+                await performSonosSeekWithRetry(controller: controller, to: targetSeek)
+            }
+
+            if !autoPlay {
+                try await controller.pause()
+                self.isPlaying = false
+            }
+
+            if needsSeek && !wasMuted {
+                try? await controller.setMute(false)
             }
 
             controller.startPolling()
@@ -361,6 +397,35 @@ class PlayerService: ObservableObject {
             isPlaying = false
             throw error
         }
+    }
+
+    private func performSonosSeekWithRetry(
+        controller: SonosController,
+        to seconds: TimeInterval,
+        maxAttempts: Int = 15,
+        interval: TimeInterval = 0.2
+    ) async {
+        logToDebugFile("⏩ Seeking Sonos to \(seconds)s (with transition retry)")
+        for attempt in 1...maxAttempts {
+            do {
+                try await controller.seek(to: seconds)
+                self.currentTime = seconds
+                logToDebugFile("✅ Sonos seek to \(seconds)s succeeded on attempt \(attempt)")
+                return
+            } catch {
+                if let sonosErr = error as? SonosError,
+                   case .soapFault(_, let detail) = sonosErr,
+                   detail.contains("701") {
+                    logToDebugFile("⏳ Sonos transitioning (701) on seek attempt \(attempt)/\(maxAttempts), retrying in \(Int(interval * 1000))ms...")
+                } else {
+                    logToDebugFile("⚠️ Seek attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)")
+                }
+                if attempt < maxAttempts {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                }
+            }
+        }
+        logToDebugFile("⚠️ Sonos seek to \(seconds)s timed out after \(maxAttempts) attempts")
     }
 
     private func teardownSonosController() async {
@@ -408,7 +473,13 @@ class PlayerService: ObservableObject {
         logToDebugFile("🔄 Output target changing from \(previous.displayName) to \(target.displayName)")
 
         let wasPlaying = self.isPlaying
-        let handoffTime = self.currentTime
+        let playerTime = self.player?.currentTime().seconds
+        let handoffTime: Double = {
+            if let pt = playerTime, pt.isFinite, pt > 0 {
+                return pt
+            }
+            return self.currentTime
+        }()
         let prog = self.currentProgramme
         let streamURL = self.currentStreamURL
 
@@ -493,6 +564,7 @@ class PlayerService: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] time in
                 guard let self = self, self.outputTarget.isSonos else { return }
+                guard self.sonosController?.isPolling == true else { return }
                 self.currentTime = time
                 self.updateNowPlayingTrack()
                 if abs(self.lastSavedTime - time) >= 5 {
@@ -548,49 +620,71 @@ class PlayerService: ObservableObject {
     func resume() {
         switch outputTarget {
         case .thisMac:
-            player?.play()
+            if let p = player {
+                p.play()
+            } else if let url = currentStreamURL, let programme = currentProgramme {
+                setupLocalPlayer(url: url, programme: programme, seekTo: currentTime, autoPlay: true)
+            } else {
+                return
+            }
         case .sonos:
-            Task { try? await sonosController?.play() }
+            guard let controller = sonosController else { return }
+            Task { try? await controller.play() }
         }
         isPlaying = true
         updateNowPlaying()
     }
     
     func seek(to seconds: Double) {
+        let target = max(0, duration > 0 ? min(seconds, duration) : seconds)
+        currentTime = target
+
         switch outputTarget {
         case .thisMac:
-            let time = CMTime(seconds: seconds, preferredTimescale: 1)
-            player?.seek(to: time) { [weak self] finished in
-                if finished {
-                    Task { @MainActor in
-                        self?.updateNowPlaying()
+            guard let player = player else {
+                pendingSeekTime = target
+                updateNowPlaying()
+                return
+            }
+            if player.currentItem?.status != .readyToPlay {
+                pendingSeekTime = target
+                updateNowPlaying()
+                return
+            }
+            pendingSeekTime = nil
+            let time = CMTime(seconds: target, preferredTimescale: 600)
+            player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    if finished {
+                        if let avSeconds = self.player?.currentTime().seconds, !avSeconds.isNaN {
+                            self.currentTime = avSeconds
+                        }
                     }
+                    self.updateNowPlaying()
                 }
             }
         case .sonos:
-            currentTime = seconds
             Task { [weak self] in
-                try? await self?.sonosController?.seek(to: seconds)
+                guard let self = self, let controller = self.sonosController else { return }
+                await self.performSonosSeekWithRetry(controller: controller, to: target)
                 await MainActor.run {
-                    self?.updateNowPlaying()
+                    self.updateNowPlaying()
                 }
             }
         }
     }
     
     func seek(by seconds: Double) {
-        switch outputTarget {
-        case .thisMac:
-            guard let player = player else { return }
-            let currentSeconds = player.currentTime().seconds
-            seek(to: currentSeconds + seconds)
-        case .sonos:
-            seek(to: max(0, currentTime + seconds))
-        }
+        let baseTime = currentTime
+        let target = max(0, baseTime + seconds)
+        let clamped = duration > 0 ? min(target, duration) : target
+        seek(to: clamped)
     }
 
     func stop() {
         saveSession()
+        pendingSeekTime = nil
         switch outputTarget {
         case .thisMac:
             player?.pause()
@@ -615,6 +709,7 @@ class PlayerService: ObservableObject {
         sonosVolumeTask = nil
         pendingSonosVolume = nil
 
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         durationObserver = nil
         statusObserver = nil
@@ -773,19 +868,22 @@ class PlayerService: ObservableObject {
         isPlaying = false
         currentProgramme = nil
         currentStreamURL = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
     
     private func updateDuration(item: AVPlayerItem) {
         let d = item.duration.seconds
-        if !d.isNaN && !d.isInfinite {
+        if !d.isNaN && !d.isInfinite && d > 0 {
             self.duration = d
+        } else if let eff = currentProgramme?.effectiveDurationInSeconds, eff > 0 {
+            self.duration = eff
         }
     }
     
     // MARK: - Media Center Integration
     
-    private func setupRemoteCommandCenter() {
+    func setupRemoteCommandCenter() {
         let commandCenter = MPRemoteCommandCenter.shared()
         
         // Remove existing targets to avoid duplication
@@ -793,57 +891,116 @@ class PlayerService: ObservableObject {
         commandCenter.pauseCommand.removeTarget(nil)
         commandCenter.togglePlayPauseCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
+        commandCenter.skipForwardCommand.removeTarget(nil)
+        commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.seekForwardCommand.removeTarget(nil)
         commandCenter.seekBackwardCommand.removeTarget(nil)
         commandCenter.nextTrackCommand.removeTarget(nil)
         commandCenter.previousTrackCommand.removeTarget(nil)
         
+        commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { [weak self] _ in
-            self?.resume()
+            Task { @MainActor in
+                guard let self = self else { return }
+                if !self.isPlaying {
+                    self.resume()
+                }
+            }
             return .success
         }
         
+        commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { [weak self] _ in
-            self?.pause()
+            Task { @MainActor in
+                guard let self = self else { return }
+                if self.isPlaying {
+                    self.pause()
+                }
+            }
             return .success
         }
         
+        commandCenter.togglePlayPauseCommand.isEnabled = true
         commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
-            self?.isPlaying ?? false ? self?.pause() : self?.resume()
+            Task { @MainActor in
+                guard let self = self else { return }
+                if self.isPlaying {
+                    self.pause()
+                } else {
+                    self.resume()
+                }
+            }
             return .success
         }
         
+        commandCenter.changePlaybackPositionCommand.isEnabled = true
         commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
             if let e = event as? MPChangePlaybackPositionCommandEvent {
-                self?.seek(to: e.positionTime)
+                Task { @MainActor in
+                    self?.seek(to: e.positionTime)
+                }
                 return .success
             }
             return .commandFailed
         }
         
-        commandCenter.seekForwardCommand.addTarget { [weak self] _ in
-            self?.seek(by: 15)
+        commandCenter.skipForwardCommand.isEnabled = true
+        commandCenter.skipForwardCommand.preferredIntervals = [15]
+        commandCenter.skipForwardCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                self?.seek(by: 15)
+            }
             return .success
         }
         
+        commandCenter.skipBackwardCommand.isEnabled = true
+        commandCenter.skipBackwardCommand.preferredIntervals = [15]
+        commandCenter.skipBackwardCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                self?.seek(by: -15)
+            }
+            return .success
+        }
+
+        commandCenter.seekForwardCommand.isEnabled = true
+        commandCenter.seekForwardCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                self?.seek(by: 15)
+            }
+            return .success
+        }
+        
+        commandCenter.seekBackwardCommand.isEnabled = true
         commandCenter.seekBackwardCommand.addTarget { [weak self] _ in
-            self?.seek(by: -15)
+            Task { @MainActor in
+                self?.seek(by: -15)
+            }
             return .success
         }
 
+        commandCenter.nextTrackCommand.isEnabled = true
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
-            self?.skipToNextTrack()
+            Task { @MainActor in
+                self?.skipToNextTrack()
+            }
             return .success
         }
 
+        commandCenter.previousTrackCommand.isEnabled = true
         commandCenter.previousTrackCommand.addTarget { [weak self] _ in
-            self?.skipToPreviousTrack()
+            Task { @MainActor in
+                self?.skipToPreviousTrack()
+            }
             return .success
         }
     }
     
     private func updateNowPlaying() {
-        guard let programme = currentProgramme else { return }
+        guard let programme = currentProgramme else {
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
         
         var nowPlayingInfo = [String: Any]()
         nowPlayingInfo[MPMediaItemPropertyTitle] = programme.name
@@ -863,6 +1020,7 @@ class PlayerService: ObservableObject {
         }
         
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
         
         // Fetch artwork if not already loaded and not already loading
         if currentArtwork == nil, let urlString = programme.artworkURL, let url = URL(string: urlString) {

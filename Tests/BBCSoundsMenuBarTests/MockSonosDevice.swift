@@ -22,6 +22,12 @@ final class MockSonosDevice {
     private var _receivedActions: [String] = []
     private var _customTopologyXML: String?
     private var _avTransportError: (statusCode: Int, errorCode: Int)?
+    private var _rejectSeekWhenStopped: Bool = false
+
+    var rejectSeekWhenStopped: Bool {
+        get { lock.withLock { _rejectSeekWhenStopped } }
+        set { lock.withLock { _rejectSeekWhenStopped = newValue } }
+    }
 
     var avTransportError: (statusCode: Int, errorCode: Int)? {
         get { lock.withLock { _avTransportError } }
@@ -300,6 +306,25 @@ final class MockSonosDevice {
                 </s:Envelope>
                 """
                 send(conn: conn, code: fault.statusCode, contentType: "text/xml; charset=\"utf-8\"", body: Data(faultXML.utf8))
+                return
+            }
+            if action == "Seek" && rejectSeekWhenStopped && transportState == "STOPPED" {
+                let fault701XML = """
+                <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+                  <s:Body>
+                    <s:Fault>
+                      <faultcode>s:Client</faultcode>
+                      <faultstring>UPnPError</faultstring>
+                      <detail>
+                        <UPnPError xmlns="urn:schemas-upnp-org:control-1-0">
+                          <errorCode>701</errorCode>
+                        </UPnPError>
+                      </detail>
+                    </s:Fault>
+                  </s:Body>
+                </s:Envelope>
+                """
+                send(conn: conn, code: 500, contentType: "text/xml; charset=\"utf-8\"", body: Data(fault701XML.utf8))
                 return
             }
             let responseXML = handleAVTransportAction(action: action, bodyText: bodyText)

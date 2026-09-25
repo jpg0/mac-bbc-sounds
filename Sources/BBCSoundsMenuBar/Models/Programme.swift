@@ -22,6 +22,38 @@ struct Programme: Identifiable, Equatable, Codable {
     var latestEpisodeTitle: String? = nil       // Subtitle/title for latest episode
     var latestEpisodeReleaseLabel: String? = nil // Date label for latest episode
     var latestEpisodeDuration: String? = nil    // Duration label for latest episode
+
+    var effectiveDurationInSeconds: Double {
+        guard !isLive else { return 0 }
+        if durationInSeconds > 0 {
+            return Double(durationInSeconds)
+        }
+        guard let dur = duration?.trimmingCharacters(in: .whitespacesAndNewlines), !dur.isEmpty else {
+            return 0
+        }
+        // Format 1: HH:MM:SS or MM:SS
+        let parts = dur.split(separator: ":").compactMap { Double($0) }
+        if parts.count == 3 {
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        } else if parts.count == 2 {
+            return parts[0] * 60 + parts[1]
+        }
+        // Format 2: "1 hr 30 mins", "57 mins", etc.
+        var total: Double = 0
+        if let hrRange = dur.range(of: "hr") {
+            let hrPart = dur[..<hrRange.lowerBound].trimmingCharacters(in: .whitespaces)
+            if let last = hrPart.components(separatedBy: .whitespaces).last, let hrs = Double(last) {
+                total += hrs * 3600
+            }
+        }
+        if let minRange = dur.range(of: "min") {
+            let beforeMin = dur[..<minRange.lowerBound]
+            if let last = beforeMin.components(separatedBy: .whitespaces).filter({ !$0.isEmpty }).last, let mins = Double(last) {
+                total += mins * 60
+            }
+        }
+        return total
+    }
 }
 
 struct Segment: Identifiable, Equatable, Codable {
