@@ -102,7 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func updateStatusItemAppearance() {
         guard let button = statusItem.button else { return }
         
-        if let marquee = viewModel.marqueeText {
+        if let marquee = viewModel.marqueeText, viewModel.player.isPlaying {
             equalizerAnimator.stop(button: button)
             button.image = nil
             button.title = ""

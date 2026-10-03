@@ -5,7 +5,15 @@ import AppKit
 
 @MainActor
 class PlayerService: ObservableObject {
-    @Published var isPlaying = false
+    @Published var isPlaying = false {
+        didSet {
+            guard oldValue != isPlaying else { return }
+            if !isPlaying {
+                trackUpdateTask?.cancel()
+                trackUpdateTask = nil
+            }
+        }
+    }
     @Published var volume: Float {
         didSet {
             if outputTarget.isMac {
@@ -556,6 +564,9 @@ class PlayerService: ObservableObject {
                 if self.isPlaying != isPlaying {
                     self.isPlaying = isPlaying
                     self.updateNowPlaying()
+                    if isPlaying, let prog = self.currentProgramme {
+                        self.startTrackUpdates(for: prog)
+                    }
                 }
             }
             .store(in: &sonosCancellables)
@@ -633,6 +644,9 @@ class PlayerService: ObservableObject {
         }
         isPlaying = true
         updateNowPlaying()
+        if let programme = currentProgramme {
+            startTrackUpdates(for: programme)
+        }
     }
     
     func seek(to seconds: Double) {
@@ -833,13 +847,18 @@ class PlayerService: ObservableObject {
         
         let pidToUse = programme.resolvedPID ?? programme.id
         
-        trackUpdateTask = Task {
+        trackUpdateTask = Task { [weak self] in
             // Give it a moment to stabilize if needed, or just fetch immediately
             while !Task.isCancelled {
+                guard let self = self else { break }
+                let isStillPlaying = await MainActor.run { self.isPlaying }
+                guard isStillPlaying else { break }
+
                 do {
                     if let sounds = self.bbcSounds {
                         let tracks = try await sounds.fetchSegments(pid: pidToUse, isLive: programme.isLive)
                         await MainActor.run {
+                            guard !Task.isCancelled, self.isPlaying else { return }
                             self.currentTracks = tracks
                             if programme.isLive, let current = tracks.first(where: { $0.isNowPlaying }) {
                                 if self.activeTrack?.id != current.id {
@@ -850,7 +869,7 @@ class PlayerService: ObservableObject {
                         }
                     }
                 } catch {
-                    logToDebugFile("⚠️ Track update failed for \(pidToUse): \(error.localizedDescription)")
+                    self.logToDebugFile("⚠️ Track update failed for \(pidToUse): \(error.localizedDescription)")
                 }
                 
                 if programme.isLive {

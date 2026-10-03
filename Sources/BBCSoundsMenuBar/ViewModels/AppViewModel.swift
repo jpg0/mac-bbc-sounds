@@ -89,14 +89,24 @@ class AppViewModel: ObservableObject {
             .assign(to: \.isLoadingStream, on: self)
             .store(in: &cancellables)
         
+        player.$isPlaying
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isPlaying in
+                guard let self = self else { return }
+                if !isPlaying {
+                    self.stopMarquee()
+                }
+            }
+            .store(in: &cancellables)
+
         player.$activeTrack
             .receive(on: DispatchQueue.main)
             .sink { [weak self] track in
-                if let track = track {
-                    self?.startMarquee(for: track)
+                guard let self = self else { return }
+                if let track = track, self.player.isPlaying {
+                    self.startMarquee(for: track)
                 } else {
-                    self?.marqueeTask?.cancel()
-                    self?.menubarTitle = nil
+                    self.stopMarquee()
                 }
             }
             .store(in: &cancellables)
@@ -477,19 +487,29 @@ class AppViewModel: ObservableObject {
     }
 
     private func startMarquee(for segment: Segment) {
+        guard player.isPlaying else { return }
+        stopMarquee()
         let text = "\(segment.artist) - \(segment.title)"
         marqueeText = text
         marqueeStartTime = Date()
         
-        Task {
+        marqueeTask = Task {
             // Scroll for approx 8 seconds which is enough for one pass at 3x width
             try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 if self.marqueeText == text {
-                    self.marqueeText = nil
-                    self.marqueeStartTime = nil
+                    self.stopMarquee()
                 }
             }
         }
+    }
+
+    func stopMarquee() {
+        marqueeTask?.cancel()
+        marqueeTask = nil
+        marqueeText = nil
+        marqueeStartTime = nil
+        menubarTitle = nil
     }
 }
