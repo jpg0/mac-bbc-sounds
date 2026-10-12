@@ -275,4 +275,84 @@ final class SystemAudioServiceTests: XCTestCase {
         // Because outputTarget is thisMac, the local player is not overridden via callback
         XCTAssertEqual(player.volume, 0.5)
     }
+
+    @MainActor
+    func testStartingPlaybackOnMutedSonosSpeakerUnmutesIt() async throws {
+        let mock = MockSonosDevice(roomName: "Bedroom", isMuted: true)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let device = SonosDevice(
+            id: "RINCON_BEDROOM_MUTED",
+            name: "Bedroom",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        try await player.setOutputTarget(.sonos(device))
+        XCTAssertTrue(mock.isMuted)
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/radio6.m3u8")!
+        let prog = Programme(
+            id: "m001live",
+            index: 0,
+            name: "Gilles Peterson",
+            channel: "BBC Radio 6 Music",
+            duration: nil,
+            description: "Fresh cuts",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        player.play(url: streamURL, programme: prog)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(mock.isMuted, "Starting playback should automatically unmute a previously muted Sonos speaker")
+        XCTAssertFalse(mockSystemAudio.isMuted, "Mac system audio should also be unmuted when playback starts")
+    }
+
+    @MainActor
+    func testTemporarySeekMuteDoesNotMuteSystemAudioAndRestoresUnmutedState() async throws {
+        let mock = MockSonosDevice(roomName: "Study", isMuted: false)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let device = SonosDevice(
+            id: "RINCON_STUDY_SEEK",
+            name: "Study",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        try await player.setOutputTarget(.sonos(device))
+        mockSystemAudio.setMuteCallCount = 0
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/ondemand.m3u8")!
+        let prog = Programme(
+            id: "m002vod",
+            index: 0,
+            name: "In Our Time",
+            channel: "BBC Radio 4",
+            duration: "00:45:00",
+            description: "History",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: false
+        )
+
+        player.play(url: streamURL, programme: prog, seekTo: 120.0)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertFalse(mock.isMuted, "Sonos speaker must be unmuted after initial seek completes")
+        XCTAssertFalse(mockSystemAudio.isMuted, "Mac system audio must not be left muted")
+    }
 }

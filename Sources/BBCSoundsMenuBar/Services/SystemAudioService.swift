@@ -47,6 +47,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
     private var activeDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var isMonitoring: Bool = false
     private var isSilentlyUpdating: Bool = false
+    private var silentUpdateGeneration: UInt64 = 0
     private var lastKnownVolume: Float = -1.0
     private var lastKnownMute: Bool = false
 
@@ -214,8 +215,11 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
 
     public func setVolume(_ volume: Float, silently: Bool) {
         let clamped = max(0.0, min(1.0, volume))
+        var generation: UInt64 = 0
         let devID: AudioObjectID = lock.withLock {
             if silently {
+                self.silentUpdateGeneration &+= 1
+                generation = self.silentUpdateGeneration
                 self.isSilentlyUpdating = true
             }
             self.lastKnownVolume = clamped
@@ -224,7 +228,11 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
 
         guard devID != kAudioObjectUnknown else {
             if silently {
-                lock.withLock { self.isSilentlyUpdating = false }
+                lock.withLock {
+                    if self.silentUpdateGeneration == generation {
+                        self.isSilentlyUpdating = false
+                    }
+                }
             }
             return
         }
@@ -243,17 +251,21 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         )
 
         if silently {
-            queue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.lock.withLock {
-                    self?.isSilentlyUpdating = false
+                    guard let self = self, self.silentUpdateGeneration == generation else { return }
+                    self.isSilentlyUpdating = false
                 }
             }
         }
     }
 
     public func setMute(_ isMuted: Bool, silently: Bool) {
+        var generation: UInt64 = 0
         let devID: AudioObjectID = lock.withLock {
             if silently {
+                self.silentUpdateGeneration &+= 1
+                generation = self.silentUpdateGeneration
                 self.isSilentlyUpdating = true
             }
             self.lastKnownMute = isMuted
@@ -262,7 +274,11 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
 
         guard devID != kAudioObjectUnknown else {
             if silently {
-                lock.withLock { self.isSilentlyUpdating = false }
+                lock.withLock {
+                    if self.silentUpdateGeneration == generation {
+                        self.isSilentlyUpdating = false
+                    }
+                }
             }
             return
         }
@@ -281,9 +297,10 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         )
 
         if silently {
-            queue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.lock.withLock {
-                    self?.isSilentlyUpdating = false
+                    guard let self = self, self.silentUpdateGeneration == generation else { return }
+                    self.isSilentlyUpdating = false
                 }
             }
         }

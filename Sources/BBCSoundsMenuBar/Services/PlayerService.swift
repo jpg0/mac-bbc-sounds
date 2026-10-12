@@ -62,6 +62,7 @@ class PlayerService: ObservableObject {
     private var sonosVolumeTask: Task<Void, Never>?
     private var pendingSonosVolume: Int?
     private var pendingSeekTime: Double? = nil
+    private var isPerformingTemporarySeekMute = false
 
     init(
         discoveryService: SonosDiscoveryService? = nil,
@@ -87,7 +88,7 @@ class PlayerService: ObservableObject {
 
         systemAudioService.onMuteChanged = { [weak self] isMuted in
             Task { @MainActor [weak self] in
-                guard let self = self, self.outputTarget.isSonos else { return }
+                guard let self = self, self.outputTarget.isSonos, !self.isPerformingTemporarySeekMute else { return }
                 self.handleSystemMuteChanged(isMuted)
             }
         }
@@ -172,9 +173,8 @@ class PlayerService: ObservableObject {
                     self.volume = normalized
                     self.systemAudioService.setVolume(normalized, silently: true)
                 }
-                if let initialMute = try? await controller.getMute() {
-                    self.systemAudioService.setMute(initialMute, silently: true)
-                }
+                _ = try? await controller.getMute()
+                self.systemAudioService.setMute(false, silently: true)
                 do {
                     try await self.startSonosPlayback(
                         controller: controller,
@@ -367,14 +367,18 @@ class PlayerService: ObservableObject {
         }
 
         logToDebugFile("📡 Setting Sonos transport URI: \(deliveryURL)")
+        controller.stopPolling()
+        let needsSeek = (seekTo != nil && seekTo! > 0 && !programme.isLive)
+        let wasMuted = controller.isMuted
+        var didTemporaryMute = false
+
         do {
             try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
 
-            let needsSeek = (seekTo != nil && seekTo! > 0 && !programme.isLive)
-            let wasMuted = controller.isMuted
-
             // Temporarily mute if we need to seek so that Sonos doesn't burst audio from 0:00 while seeking
             if needsSeek && !wasMuted {
+                isPerformingTemporarySeekMute = true
+                didTemporaryMute = true
                 try? await controller.setMute(true)
             }
 
@@ -391,7 +395,8 @@ class PlayerService: ObservableObject {
                 self.isPlaying = false
             }
 
-            if needsSeek && !wasMuted {
+            isPerformingTemporarySeekMute = false
+            if didTemporaryMute || (autoPlay && controller.isMuted) {
                 try? await controller.setMute(false)
             }
 
@@ -400,6 +405,12 @@ class PlayerService: ObservableObject {
             updateNowPlaying()
             startTrackUpdates(for: programme)
         } catch {
+            if didTemporaryMute {
+                isPerformingTemporarySeekMute = false
+                Task {
+                    try? await controller.setMute(false)
+                }
+            }
             logToDebugFile("❌ Sonos playback error: \(error.localizedDescription)")
             playerError = error.localizedDescription
             isPlaying = false
@@ -524,7 +535,8 @@ class PlayerService: ObservableObject {
                 self.systemAudioService.setVolume(normalized, silently: true)
             }
             if let initialMute = try? await controller.getMute() {
-                self.systemAudioService.setMute(initialMute, silently: true)
+                let targetMute = (streamURL != nil && wasPlaying) ? false : initialMute
+                self.systemAudioService.setMute(targetMute, silently: true)
             }
 
             if let streamURL = streamURL, let prog = prog {
@@ -610,7 +622,7 @@ class PlayerService: ObservableObject {
         controller.$isMuted
             .receive(on: DispatchQueue.main)
             .sink { [weak self] isMuted in
-                guard let self = self, self.outputTarget.isSonos else { return }
+                guard let self = self, self.outputTarget.isSonos, !self.isPerformingTemporarySeekMute else { return }
                 self.systemAudioService.setMute(isMuted, silently: true)
             }
             .store(in: &sonosCancellables)
@@ -640,7 +652,12 @@ class PlayerService: ObservableObject {
             }
         case .sonos:
             guard let controller = sonosController else { return }
-            Task { try? await controller.play() }
+            Task {
+                if controller.isMuted {
+                    try? await controller.setMute(false)
+                }
+                try? await controller.play()
+            }
         }
         isPlaying = true
         updateNowPlaying()
