@@ -355,4 +355,199 @@ final class SystemAudioServiceTests: XCTestCase {
         XCTAssertFalse(mock.isMuted, "Sonos speaker must be unmuted after initial seek completes")
         XCTAssertFalse(mockSystemAudio.isMuted, "Mac system audio must not be left muted")
     }
+
+    @MainActor
+    func testSendingAudioToSonosLimitsVolumeTo25PercentAndSetsSystemVolume() async throws {
+        let mock = MockSonosDevice(roomName: "Living Room", currentVolume: 50)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let device = SonosDevice(
+            id: "RINCON_LIVING_ROOM_VOL",
+            name: "Living Room",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        try await player.setOutputTarget(.sonos(device))
+        XCTAssertEqual(player.volume, 0.50, accuracy: 0.01)
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/radio6.m3u8")!
+        let prog = Programme(
+            id: "m001live",
+            index: 0,
+            name: "Gilles Peterson",
+            channel: "BBC Radio 6 Music",
+            duration: nil,
+            description: "Fresh cuts",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        // Starting playback sends audio to Sonos -> must limit to 25%
+        player.play(url: streamURL, programme: prog)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be capped to 25% when sending audio")
+        XCTAssertEqual(player.volume, 0.25, accuracy: 0.01, "Player volume must be updated to 25%")
+        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25, "Mac system audio must also be changed to 25%")
+
+        // Once playing, lifting above 25% is fine
+        mockSystemAudio.simulateUserVolumeChange(0.45)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 45, "Lifting volume above 25% once playing must be allowed")
+        XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
+    }
+
+    @MainActor
+    func testHandoffActivePlaybackToSonosLimitsVolumeTo25Percent() async throws {
+        let mock = MockSonosDevice(roomName: "Kitchen", currentVolume: 60)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/ondemand.m3u8")!
+        let prog = Programme(
+            id: "m002vod",
+            index: 0,
+            name: "Desert Island Discs",
+            channel: "BBC Radio 4",
+            duration: "00:45:00",
+            description: "Interviews",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: false
+        )
+
+        player.play(url: streamURL, programme: prog)
+        player.setVolume(0.70)
+        XCTAssertTrue(player.isPlaying)
+
+        let device = SonosDevice(
+            id: "RINCON_KITCHEN_HANDOFF_VOL",
+            name: "Kitchen",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        // Handing off active playback to Sonos -> must limit to 25%
+        try await player.setOutputTarget(.sonos(device))
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be limited to 25% on handoff")
+        XCTAssertEqual(player.volume, 0.25, accuracy: 0.01, "Player volume must be 25%")
+        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25, "Mac system audio must be changed to 25%")
+    }
+
+    @MainActor
+    func testSendingAudioToSonosPreservesVolumeIfAlreadyBelow25Percent() async throws {
+        let mock = MockSonosDevice(roomName: "Bedroom", currentVolume: 15)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let device = SonosDevice(
+            id: "RINCON_BEDROOM_LOW_VOL",
+            name: "Bedroom",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        try await player.setOutputTarget(.sonos(device))
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/radio4.m3u8")!
+        let prog = Programme(
+            id: "m003live",
+            index: 0,
+            name: "Today",
+            channel: "BBC Radio 4",
+            duration: nil,
+            description: "News",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        player.play(url: streamURL, programme: prog)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 15, "Sonos speaker volume below 25% must be preserved")
+        XCTAssertEqual(player.volume, 0.15, accuracy: 0.01)
+        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.15)
+    }
+
+    @MainActor
+    func testChangingTrackWhileAlreadyPlayingOnSonosDoesNotResetLiftedVolume() async throws {
+        let mock = MockSonosDevice(roomName: "Office", currentVolume: 30)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let device = SonosDevice(
+            id: "RINCON_OFFICE_KEEP_VOL",
+            name: "Office",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        try await player.setOutputTarget(.sonos(device))
+
+        let streamURL1 = URL(string: "https://open.live.bbc.co.uk/track1.m3u8")!
+        let prog1 = Programme(
+            id: "p001",
+            index: 0,
+            name: "Track 1",
+            channel: "BBC Radio 1",
+            duration: nil,
+            description: "Hits",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        player.play(url: streamURL1, programme: prog1)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 25)
+
+        // Lift volume once playing to 45%
+        player.setVolume(0.45)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mock.currentVolume, 45)
+
+        // Play another track on the same speaker while already playing
+        let streamURL2 = URL(string: "https://open.live.bbc.co.uk/track2.m3u8")!
+        let prog2 = Programme(
+            id: "p002",
+            index: 1,
+            name: "Track 2",
+            channel: "BBC Radio 1",
+            duration: nil,
+            description: "More hits",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        player.play(url: streamURL2, programme: prog2)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 45, "Changing track while already playing must preserve lifted volume")
+        XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
+    }
 }

@@ -162,17 +162,16 @@ class PlayerService: ObservableObject {
             setupLocalPlayer(url: url, programme: programme, seekTo: seekTo, autoPlay: true)
 
         case .sonos(let device):
+            let wasPlayingOnThisDevice = (self.isPlaying && self.outputTarget.isSonos && self.sonosController?.device.id == device.id)
             let controller = sonosController ?? makeSonosController(for: device)
             self.sonosController = controller
-            observeSonosController(controller)
 
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if let initialVol = try? await controller.getVolume() {
-                    let normalized = Float(initialVol) / 100.0
-                    self.volume = normalized
-                    self.systemAudioService.setVolume(normalized, silently: true)
+                if !wasPlayingOnThisDevice {
+                    await self.limitInitialSonosVolume(controller: controller)
                 }
+                self.observeSonosController(controller)
                 _ = try? await controller.getMute()
                 self.systemAudioService.setMute(false, silently: true)
                 do {
@@ -527,13 +526,19 @@ class PlayerService: ObservableObject {
 
             let controller = makeSonosController(for: device)
             self.sonosController = controller
+
+            let isSendingAudio = (streamURL != nil && wasPlaying)
+            if isSendingAudio {
+                await limitInitialSonosVolume(controller: controller)
+            } else {
+                if let initialVol = try? await controller.getVolume() {
+                    let normalized = Float(initialVol) / 100.0
+                    self.volume = normalized
+                    self.systemAudioService.setVolume(normalized, silently: true)
+                }
+            }
             observeSonosController(controller)
 
-            if let initialVol = try? await controller.getVolume() {
-                let normalized = Float(initialVol) / 100.0
-                self.volume = normalized
-                self.systemAudioService.setVolume(normalized, silently: true)
-            }
             if let initialMute = try? await controller.getMute() {
                 let targetMute = (streamURL != nil && wasPlaying) ? false : initialMute
                 self.systemAudioService.setMute(targetMute, silently: true)
@@ -556,6 +561,19 @@ class PlayerService: ObservableObject {
                     throw error
                 }
             }
+        }
+    }
+
+    private func limitInitialSonosVolume(controller: SonosController) async {
+        let initialVol = try? await controller.getVolume()
+        if let vol = initialVol, vol <= 25 {
+            let normalized = Float(vol) / 100.0
+            self.volume = normalized
+            self.systemAudioService.setVolume(normalized, silently: true)
+        } else {
+            try? await controller.setVolume(25)
+            self.volume = 0.25
+            self.systemAudioService.setVolume(0.25, silently: true)
         }
     }
 
