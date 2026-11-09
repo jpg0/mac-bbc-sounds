@@ -295,22 +295,19 @@ public final class SonosController: ObservableObject {
     /// Sends the `Play` command to the target Sonos speaker.
     public func play() async throws {
         _ = try await sendAVTransportAction("Play", actionBody: "<Speed>1</Speed>")
-        self.transportState = .playing
-        self.isPlaying = true
+        updateTransportState(.playing)
     }
 
     /// Sends the `Pause` command to the target Sonos speaker.
     public func pause() async throws {
         _ = try await sendAVTransportAction("Pause")
-        self.transportState = .paused
-        self.isPlaying = false
+        updateTransportState(.paused)
     }
 
     /// Sends the `Stop` command to the target Sonos speaker.
     public func stop() async throws {
         _ = try await sendAVTransportAction("Stop")
-        self.transportState = .stopped
-        self.isPlaying = false
+        updateTransportState(.stopped)
     }
 
     /// Fetches the current transport status and playback state via GetTransportInfo.
@@ -318,9 +315,7 @@ public final class SonosController: ObservableObject {
     public func getTransportInfo() async throws -> SonosTransportInfo {
         let data = try await sendAVTransportAction("GetTransportInfo")
         let info = try SonosTransportInfoParser.parse(xmlData: data)
-        self.transportInfo = info
-        self.transportState = info.state
-        self.isPlaying = (info.state == .playing)
+        updateTransportState(info.state, info: info)
         return info
     }
 
@@ -385,16 +380,28 @@ public final class SonosController: ObservableObject {
         if let tInfo = try? await getTransportInfo() {
             self.transportInfo = tInfo
             self.transportState = tInfo.state
-            if tInfo.state == .playing {
-                self.isPlaying = true
-            } else if tInfo.state == .stopped || tInfo.state == .paused {
-                self.isPlaying = false
-            }
+            self.isPlaying = (tInfo.state == .playing)
         }
         if let pInfo = try? await getPositionInfo() {
             self.positionInfo = pInfo
             self.currentTime = pInfo.trackRelTime
             self.duration = pInfo.trackDuration
+        }
+    }
+
+    // MARK: - State Management Helpers
+
+    private func updateTransportState(_ state: SonosTransportState, info: SonosTransportInfo? = nil) {
+        self.transportState = state
+        self.isPlaying = (state == .playing)
+        if let info = info {
+            self.transportInfo = info
+        } else {
+            self.transportInfo = SonosTransportInfo(
+                state: state,
+                status: self.transportInfo.status,
+                speed: self.transportInfo.speed
+            )
         }
     }
 

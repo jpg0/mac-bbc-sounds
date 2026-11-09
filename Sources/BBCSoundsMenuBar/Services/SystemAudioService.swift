@@ -46,8 +46,10 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
 
     private var activeDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var isMonitoring: Bool = false
-    private var isSilentlyUpdating: Bool = false
-    private var silentUpdateGeneration: UInt64 = 0
+    private var targetProgrammaticVolume: Float?
+    private var targetProgrammaticMute: Bool?
+    private var volumeTargetGeneration: UInt64 = 0
+    private var muteTargetGeneration: UInt64 = 0
     private var lastKnownVolume: Float = -1.0
     private var lastKnownMute: Bool = false
 
@@ -76,6 +78,8 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         lock.withLock {
             guard isMonitoring else { return }
             isMonitoring = false
+            targetProgrammaticVolume = nil
+            targetProgrammaticMute = nil
         }
 
         removeDeviceListener()
@@ -112,6 +116,8 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         guard let deviceID = defaultOutputDeviceID() else { return }
         lock.withLock {
             self.activeDeviceID = deviceID
+            self.targetProgrammaticVolume = nil
+            self.targetProgrammaticMute = nil
             if let vol = readVolume(for: deviceID) {
                 self.lastKnownVolume = vol
             }
@@ -218,19 +224,21 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         var generation: UInt64 = 0
         let devID: AudioObjectID = lock.withLock {
             if silently {
-                self.silentUpdateGeneration &+= 1
-                generation = self.silentUpdateGeneration
-                self.isSilentlyUpdating = true
+                self.volumeTargetGeneration &+= 1
+                generation = self.volumeTargetGeneration
+                self.targetProgrammaticVolume = clamped
+                self.lastKnownVolume = clamped
+            } else {
+                self.targetProgrammaticVolume = nil
             }
-            self.lastKnownVolume = clamped
             return activeDeviceID != kAudioObjectUnknown ? activeDeviceID : (defaultOutputDeviceID() ?? AudioObjectID(kAudioObjectUnknown))
         }
 
         guard devID != kAudioObjectUnknown else {
             if silently {
                 lock.withLock {
-                    if self.silentUpdateGeneration == generation {
-                        self.isSilentlyUpdating = false
+                    if self.volumeTargetGeneration == generation {
+                        self.targetProgrammaticVolume = nil
                     }
                 }
             }
@@ -241,7 +249,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         var vol = Float32(clamped)
         let size = UInt32(MemoryLayout<Float32>.size)
 
-        _ = AudioObjectSetPropertyData(
+        let status = AudioObjectSetPropertyData(
             devID,
             &address,
             0,
@@ -250,11 +258,20 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
             &vol
         )
 
+        if status != noErr && silently {
+            lock.withLock {
+                if self.volumeTargetGeneration == generation {
+                    self.targetProgrammaticVolume = nil
+                }
+            }
+            return
+        }
+
         if silently {
-            queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.lock.withLock {
-                    guard let self = self, self.silentUpdateGeneration == generation else { return }
-                    self.isSilentlyUpdating = false
+                    guard let self = self, self.volumeTargetGeneration == generation else { return }
+                    self.targetProgrammaticVolume = nil
                 }
             }
         }
@@ -264,19 +281,21 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         var generation: UInt64 = 0
         let devID: AudioObjectID = lock.withLock {
             if silently {
-                self.silentUpdateGeneration &+= 1
-                generation = self.silentUpdateGeneration
-                self.isSilentlyUpdating = true
+                self.muteTargetGeneration &+= 1
+                generation = self.muteTargetGeneration
+                self.targetProgrammaticMute = isMuted
+                self.lastKnownMute = isMuted
+            } else {
+                self.targetProgrammaticMute = nil
             }
-            self.lastKnownMute = isMuted
             return activeDeviceID != kAudioObjectUnknown ? activeDeviceID : (defaultOutputDeviceID() ?? AudioObjectID(kAudioObjectUnknown))
         }
 
         guard devID != kAudioObjectUnknown else {
             if silently {
                 lock.withLock {
-                    if self.silentUpdateGeneration == generation {
-                        self.isSilentlyUpdating = false
+                    if self.muteTargetGeneration == generation {
+                        self.targetProgrammaticMute = nil
                     }
                 }
             }
@@ -287,7 +306,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         var muteVal: UInt32 = isMuted ? 1 : 0
         let size = UInt32(MemoryLayout<UInt32>.size)
 
-        _ = AudioObjectSetPropertyData(
+        let status = AudioObjectSetPropertyData(
             devID,
             &address,
             0,
@@ -296,11 +315,20 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
             &muteVal
         )
 
+        if status != noErr && silently {
+            lock.withLock {
+                if self.muteTargetGeneration == generation {
+                    self.targetProgrammaticMute = nil
+                }
+            }
+            return
+        }
+
         if silently {
-            queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            queue.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 self?.lock.withLock {
-                    guard let self = self, self.silentUpdateGeneration == generation else { return }
-                    self.isSilentlyUpdating = false
+                    guard let self = self, self.muteTargetGeneration == generation else { return }
+                    self.targetProgrammaticMute = nil
                 }
             }
         }
@@ -386,30 +414,60 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
     }
 
     private func handleVolumeChanged(on deviceID: AudioObjectID) {
-        let (silently, prevVol) = lock.withLock { (isSilentlyUpdating, lastKnownVolume) }
-        guard !silently else { return }
-
         guard let newVol = readVolume(for: deviceID) else { return }
-        guard abs(newVol - prevVol) > 0.005 else { return }
 
-        lock.withLock {
+        let shouldNotify: Bool = lock.withLock {
+            guard isMonitoring, activeDeviceID == deviceID else { return false }
+
+            if let target = targetProgrammaticVolume {
+                if abs(newVol - target) < 0.015 {
+                    // CoreAudio echo matches programmatic target: consume target and suppress callback.
+                    self.targetProgrammaticVolume = nil
+                    self.lastKnownVolume = newVol
+                    return false
+                } else {
+                    // Incoming value differs from target: authentic user change, clear stale target.
+                    self.targetProgrammaticVolume = nil
+                }
+            }
+
+            guard abs(newVol - lastKnownVolume) > 0.005 else { return false }
+
             self.lastKnownVolume = newVol
+            return true
         }
 
-        onVolumeChanged?(newVol)
+        if shouldNotify {
+            onVolumeChanged?(newVol)
+        }
     }
 
     private func handleMuteChanged(on deviceID: AudioObjectID) {
-        let (silently, prevMute) = lock.withLock { (isSilentlyUpdating, lastKnownMute) }
-        guard !silently else { return }
-
         guard let newMute = readMute(for: deviceID) else { return }
-        guard newMute != prevMute else { return }
 
-        lock.withLock {
+        let shouldNotify: Bool = lock.withLock {
+            guard isMonitoring, activeDeviceID == deviceID else { return false }
+
+            if let target = targetProgrammaticMute {
+                if newMute == target {
+                    // CoreAudio echo matches programmatic target: consume target and suppress callback.
+                    self.targetProgrammaticMute = nil
+                    self.lastKnownMute = newMute
+                    return false
+                } else {
+                    // Incoming value differs from target: authentic user change, clear stale target.
+                    self.targetProgrammaticMute = nil
+                }
+            }
+
+            guard newMute != lastKnownMute else { return false }
+
             self.lastKnownMute = newMute
+            return true
         }
 
-        onMuteChanged?(newMute)
+        if shouldNotify {
+            onMuteChanged?(newMute)
+        }
     }
 }

@@ -104,6 +104,10 @@ final class LocalProxyServer {
     /// Start the listener and return the bound port number.
     @discardableResult
     func start() throws -> UInt16 {
+        if isRunning {
+            return port
+        }
+
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         switch bindAddress {
@@ -132,17 +136,31 @@ final class LocalProxyServer {
             ready.enter()
             var boundPort: UInt16 = 0
             var failureError: Error?
+            var hasSignaledReady = false
 
             l.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .ready:
                     boundPort = l.port?.rawValue ?? 0
                     self?.port = boundPort
-                    ready.leave()
+                    if !hasSignaledReady {
+                        hasSignaledReady = true
+                        ready.leave()
+                    }
                 case .failed(let err):
                     print("⚠️ [LocalProxyServer] Listener failed on port \(port.rawValue): \(err)")
                     failureError = err
-                    ready.leave()
+                    if !hasSignaledReady {
+                        hasSignaledReady = true
+                        ready.leave()
+                    } else {
+                        self?.stop()
+                    }
+                case .cancelled:
+                    if !hasSignaledReady {
+                        hasSignaledReady = true
+                        ready.leave()
+                    }
                 default:
                     break
                 }
@@ -171,10 +189,18 @@ final class LocalProxyServer {
         } catch {
             if targetPort != .any {
                 print("⚠️ [LocalProxyServer] Failed to bind to preferred port \(targetPort.rawValue), falling back to ephemeral port: \(error.localizedDescription)")
-                let (l, p) = try startListener(on: .any)
-                self.listener = l
-                self.port = p
+                do {
+                    let (l, p) = try startListener(on: .any)
+                    self.listener = l
+                    self.port = p
+                } catch {
+                    self.listener = nil
+                    self.port = 0
+                    throw error
+                }
             } else {
+                self.listener = nil
+                self.port = 0
                 throw error
             }
         }
@@ -193,7 +219,7 @@ final class LocalProxyServer {
     ///   - host: Optional override host to advertise (defaults to advertisedHost or "127.0.0.1").
     /// - Returns: The HTTP URL on this proxy server.
     public func relayURL(for upstreamURL: URL, host: String? = nil) -> URL? {
-        guard port > 0 else { return nil }
+        guard isRunning else { return nil }
         let effectiveHost = host ?? advertisedHost ?? "127.0.0.1"
         var comps = URLComponents()
         comps.scheme = "http"
@@ -207,6 +233,7 @@ final class LocalProxyServer {
     func stop() {
         listener?.cancel()
         listener = nil
+        port = 0
         print("🔴 [LocalProxyServer] Stopped")
     }
 

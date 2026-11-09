@@ -23,6 +23,31 @@ public enum SonosTransportState: String, Sendable, Equatable {
             self = .unknown
         }
     }
+
+    /// Whether this state indicates active playback.
+    public var isPlaying: Bool {
+        self == .playing
+    }
+
+    /// Whether this state indicates paused playback.
+    public var isPaused: Bool {
+        self == .paused
+    }
+
+    /// Whether this state indicates stopped playback.
+    public var isStopped: Bool {
+        self == .stopped
+    }
+
+    /// Whether playback is halted (either stopped or paused).
+    public var isStoppedOrPaused: Bool {
+        self == .stopped || self == .paused
+    }
+
+    /// Whether this state represents a transition (buffering or connecting).
+    public var isTransitioning: Bool {
+        self == .transitioning
+    }
 }
 
 /// Transport info representing the current status and speed of playback on Sonos.
@@ -30,6 +55,11 @@ public struct SonosTransportInfo: Equatable, Sendable {
     public let state: SonosTransportState
     public let status: String
     public let speed: String
+
+    /// Whether this transport info indicates active playback.
+    public var isPlaying: Bool {
+        state.isPlaying
+    }
 
     public init(
         state: SonosTransportState = .stopped,

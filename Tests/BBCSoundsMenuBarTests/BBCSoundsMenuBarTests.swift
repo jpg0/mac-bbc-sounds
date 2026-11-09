@@ -577,6 +577,30 @@ final class BBCSoundsMenuBarTests: XCTestCase {
 
     // MARK: - Unit Tests: LocalProxyServer LAN Binding and Playlist Rewriting
 
+    func testLocalProxyServerLifecycleAndRelayURL() throws {
+        let server = LocalProxyServer(proxyConfig: nil)
+        let sampleURL = URL(string: "https://open.live.bbc.co.uk/master.m3u8")!
+
+        XCTAssertFalse(server.isRunning)
+        XCTAssertEqual(server.port, 0)
+        XCTAssertNil(server.relayURL(for: sampleURL), "relayURL must return nil before server is started")
+
+        let port = try server.start()
+        XCTAssertTrue(server.isRunning)
+        XCTAssertEqual(server.port, port)
+        XCTAssertNotNil(server.relayURL(for: sampleURL))
+
+        // Multiple start() calls when running should be idempotent and return the same port
+        let samePort = try server.start()
+        XCTAssertEqual(samePort, port)
+        XCTAssertTrue(server.isRunning)
+
+        server.stop()
+        XCTAssertFalse(server.isRunning)
+        XCTAssertEqual(server.port, 0, "port should be reset to 0 upon stop()")
+        XCTAssertNil(server.relayURL(for: sampleURL), "relayURL must return nil when server is stopped")
+    }
+
     func testLocalProxyServerLANBindingAndPlaylistRewriting() throws {
         let server = LocalProxyServer(proxyConfig: nil, bindAddress: .any, advertisedHost: "192.168.1.100")
         let port = try server.start()

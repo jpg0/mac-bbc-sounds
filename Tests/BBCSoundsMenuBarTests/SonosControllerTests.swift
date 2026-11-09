@@ -614,6 +614,117 @@ final class SonosControllerTests: XCTestCase {
         controller.stopPolling()
         XCTAssertFalse(controller.isPolling)
     }
+
+    @MainActor
+    func testSonosTransportStateAndInfoHelpers() {
+        XCTAssertTrue(SonosTransportState.playing.isPlaying)
+        XCTAssertFalse(SonosTransportState.playing.isPaused)
+        XCTAssertFalse(SonosTransportState.playing.isStopped)
+        XCTAssertFalse(SonosTransportState.playing.isStoppedOrPaused)
+        XCTAssertFalse(SonosTransportState.playing.isTransitioning)
+
+        XCTAssertFalse(SonosTransportState.paused.isPlaying)
+        XCTAssertTrue(SonosTransportState.paused.isPaused)
+        XCTAssertFalse(SonosTransportState.paused.isStopped)
+        XCTAssertTrue(SonosTransportState.paused.isStoppedOrPaused)
+        XCTAssertFalse(SonosTransportState.paused.isTransitioning)
+
+        XCTAssertFalse(SonosTransportState.stopped.isPlaying)
+        XCTAssertFalse(SonosTransportState.stopped.isPaused)
+        XCTAssertTrue(SonosTransportState.stopped.isStopped)
+        XCTAssertTrue(SonosTransportState.stopped.isStoppedOrPaused)
+        XCTAssertFalse(SonosTransportState.stopped.isTransitioning)
+
+        XCTAssertFalse(SonosTransportState.transitioning.isPlaying)
+        XCTAssertFalse(SonosTransportState.transitioning.isPaused)
+        XCTAssertFalse(SonosTransportState.transitioning.isStopped)
+        XCTAssertFalse(SonosTransportState.transitioning.isStoppedOrPaused)
+        XCTAssertTrue(SonosTransportState.transitioning.isTransitioning)
+
+        XCTAssertFalse(SonosTransportState.unknown.isPlaying)
+        XCTAssertFalse(SonosTransportState.unknown.isStoppedOrPaused)
+
+        let playingInfo = SonosTransportInfo(state: .playing)
+        XCTAssertTrue(playingInfo.isPlaying)
+
+        let pausedInfo = SonosTransportInfo(state: .paused)
+        XCTAssertFalse(pausedInfo.isPlaying)
+    }
+
+    @MainActor
+    func testPollStateUpdatesIsPlayingWhenTransitioningOrUnknown() async throws {
+        let mock = MockSonosDevice(
+            roomName: "Kitchen",
+            transportState: "PLAYING"
+        )
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_POLLTEST",
+            name: "Kitchen",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        // Initial poll when playing
+        await controller.pollState()
+        XCTAssertEqual(controller.transportState, .playing)
+        XCTAssertEqual(controller.transportInfo.state, .playing)
+        XCTAssertTrue(controller.isPlaying)
+
+        // Transition to TRANSITIONING: isPlaying should become false
+        mock.transportState = "TRANSITIONING"
+        await controller.pollState()
+        XCTAssertEqual(controller.transportState, .transitioning)
+        XCTAssertEqual(controller.transportInfo.state, .transitioning)
+        XCTAssertFalse(controller.isPlaying)
+
+        // Transition to UNKNOWN: isPlaying should remain false
+        mock.transportState = "UNKNOWN"
+        await controller.pollState()
+        XCTAssertEqual(controller.transportState, .unknown)
+        XCTAssertEqual(controller.transportInfo.state, .unknown)
+        XCTAssertFalse(controller.isPlaying)
+    }
+
+    @MainActor
+    func testPlayPauseStopOptimisticStateConsistency() async throws {
+        let mock = MockSonosDevice(
+            roomName: "Office",
+            transportState: "STOPPED"
+        )
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let device = SonosDevice(
+            id: "RINCON_OFFICE",
+            name: "Office",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        let controller = SonosController(device: device)
+
+        try await controller.play()
+        XCTAssertEqual(controller.transportState, .playing)
+        XCTAssertEqual(controller.transportInfo.state, .playing)
+        XCTAssertTrue(controller.isPlaying)
+
+        try await controller.pause()
+        XCTAssertEqual(controller.transportState, .paused)
+        XCTAssertEqual(controller.transportInfo.state, .paused)
+        XCTAssertFalse(controller.isPlaying)
+
+        try await controller.stop()
+        XCTAssertEqual(controller.transportState, .stopped)
+        XCTAssertEqual(controller.transportInfo.state, .stopped)
+        XCTAssertFalse(controller.isPlaying)
+    }
 }
 
 // MARK: - Mock Fault URLProtocol

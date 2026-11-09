@@ -190,4 +190,56 @@ final class ShowSeekingTests: XCTestCase {
         XCTAssertTrue(seekBody.contains("<Target>00:03:00</Target>"), "Seek target should be formatted as HH:MM:SS")
         player.stop()
     }
+
+    func testDidFinishResetsAllPlaybackStateCleanly() {
+        let player = PlayerService()
+        let prog = Programme(
+            id: "m00finished", index: 0, name: "Finished Show", channel: "Radio 4",
+            duration: "00:30:00", description: nil, firstBroadcast: nil,
+            artworkURL: nil, isLive: false, durationInSeconds: 1800
+        )
+        player.currentProgramme = prog
+        player.isPlaying = true
+        player.isLoading = true
+        player.currentTime = 1800.0
+        player.duration = 1800.0
+        player.pendingSeekTime = 50.0
+        player.currentTracks = [Segment(id: "s1", artist: "Artist", title: "Track", startTime: 0, label: nil, isNowPlaying: true)]
+        player.activeTrack = player.currentTracks.first
+
+        player.didFinish()
+
+        XCTAssertFalse(player.isPlaying)
+        XCTAssertFalse(player.isLoading)
+        XCTAssertEqual(player.currentTime, 0.0)
+        XCTAssertEqual(player.duration, 0.0)
+        XCTAssertNil(player.pendingSeekTime)
+        XCTAssertNil(player.currentProgramme)
+        XCTAssertNil(player.currentStreamURL)
+        XCTAssertNil(player.activeTrack)
+        XCTAssertTrue(player.currentTracks.isEmpty)
+        XCTAssertNil(player.currentArtwork)
+    }
+
+    func testResetPlaybackStateWithKeepProgrammePreservesProgramme() {
+        let player = PlayerService()
+        let prog = Programme(
+            id: "m00keep", index: 0, name: "Keep Show", channel: "Radio 4",
+            duration: "00:30:00", description: nil, firstBroadcast: nil,
+            artworkURL: nil, isLive: false, durationInSeconds: 1800
+        )
+        player.currentProgramme = prog
+        player.isPlaying = true
+        player.currentTime = 500.0
+        player.duration = 1800.0
+        player.pendingSeekTime = 600.0
+
+        player.resetPlaybackState(keepProgramme: true)
+
+        XCTAssertFalse(player.isPlaying)
+        XCTAssertEqual(player.currentTime, 0.0)
+        XCTAssertEqual(player.duration, 0.0)
+        XCTAssertNil(player.pendingSeekTime)
+        XCTAssertEqual(player.currentProgramme?.id, "m00keep")
+    }
 }

@@ -61,7 +61,7 @@ class PlayerService: ObservableObject {
     private var handoffTask: Task<Void, Never>?
     private var sonosVolumeTask: Task<Void, Never>?
     private var pendingSonosVolume: Int?
-    private var pendingSeekTime: Double? = nil
+    var pendingSeekTime: Double? = nil
     private var isPerformingTemporarySeekMute = false
 
     init(
@@ -185,6 +185,8 @@ class PlayerService: ObservableObject {
                 } catch {
                     self.logToDebugFile("❌ Failed to play to Sonos: \(error.localizedDescription)")
                     self.playerError = error.localizedDescription
+                    self.pendingSeekTime = nil
+                    self.isPerformingTemporarySeekMute = false
                     self.isLoading = false
                     self.isPlaying = false
                 }
@@ -298,15 +300,25 @@ class PlayerService: ObservableObject {
                     let errMsg = item.error?.localizedDescription ?? "Unknown failure"
                     self.logToDebugFile("Status: Failed - \(errMsg)")
                     self.playerError = errMsg
+                    self.pendingSeekTime = nil
                     self.isLoading = false
+                    self.isPlaying = false
+                    self.updateNowPlaying()
                 }
                 self.logMediaError(for: item)
             }
 
         NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self] notification in
             Task { @MainActor in
+                guard let self = self else { return }
                 let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
-                self?.logToDebugFile("Playback Failed To Play To End: \(error?.localizedDescription ?? "Unknown")")
+                let errMsg = error?.localizedDescription ?? "Playback failed"
+                self.logToDebugFile("Playback Failed To Play To End: \(errMsg)")
+                self.playerError = errMsg
+                self.pendingSeekTime = nil
+                self.isLoading = false
+                self.isPlaying = false
+                self.updateNowPlaying()
             }
         }
 
@@ -335,8 +347,15 @@ class PlayerService: ObservableObject {
     ) async throws {
         isLoading = true
         playerError = nil
+        var didTemporaryMute = false
         defer {
             isLoading = false
+            if isPerformingTemporarySeekMute {
+                isPerformingTemporarySeekMute = false
+                Task {
+                    try? await controller.setMute(false)
+                }
+            }
         }
 
         let deliveryURL: URL
@@ -369,7 +388,6 @@ class PlayerService: ObservableObject {
         controller.stopPolling()
         let needsSeek = (seekTo != nil && seekTo! > 0 && !programme.isLive)
         let wasMuted = controller.isMuted
-        var didTemporaryMute = false
 
         do {
             try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
@@ -404,8 +422,8 @@ class PlayerService: ObservableObject {
             updateNowPlaying()
             startTrackUpdates(for: programme)
         } catch {
+            isPerformingTemporarySeekMute = false
             if didTemporaryMute {
-                isPerformingTemporarySeekMute = false
                 Task {
                     try? await controller.setMute(false)
                 }
@@ -413,6 +431,8 @@ class PlayerService: ObservableObject {
             logToDebugFile("❌ Sonos playback error: \(error.localizedDescription)")
             playerError = error.localizedDescription
             isPlaying = false
+            isLoading = false
+            pendingSeekTime = nil
             throw error
         }
     }
@@ -447,6 +467,7 @@ class PlayerService: ObservableObject {
     }
 
     private func teardownSonosController() async {
+        isPerformingTemporarySeekMute = false
         sonosController?.stopPolling()
         let prevController = sonosController
         sonosController = nil
@@ -460,12 +481,16 @@ class PlayerService: ObservableObject {
         guard target != outputTarget else { return }
         let previous = outputTarget
         isPerformingProgrammaticHandoff = true
+        handoffTask?.cancel()
+        handoffTask = nil
         self.outputTarget = target
         isPerformingProgrammaticHandoff = false
         do {
             try await performHandoff(from: previous, to: target)
         } catch {
             self.playerError = error.localizedDescription
+            self.pendingSeekTime = nil
+            self.isPerformingTemporarySeekMute = false
             self.isLoading = false
             self.isPlaying = false
             throw error
@@ -479,8 +504,11 @@ class PlayerService: ObservableObject {
             do {
                 try await self?.performHandoff(from: previous, to: target)
             } catch {
+                guard !Task.isCancelled else { return }
                 self?.logToDebugFile("❌ Handoff failed: \(error.localizedDescription)")
                 self?.playerError = error.localizedDescription
+                self?.pendingSeekTime = nil
+                self?.isPerformingTemporarySeekMute = false
                 self?.isLoading = false
                 self?.isPlaying = false
             }
@@ -556,6 +584,8 @@ class PlayerService: ObservableObject {
                 } catch {
                     logToDebugFile("❌ Failed to handoff to Sonos: \(error.localizedDescription)")
                     self.playerError = error.localizedDescription
+                    self.pendingSeekTime = nil
+                    self.isPerformingTemporarySeekMute = false
                     self.isLoading = false
                     self.isPlaying = false
                     throw error
@@ -731,9 +761,24 @@ class PlayerService: ObservableObject {
         seek(to: clamped)
     }
 
-    func stop() {
-        saveSession()
+    func resetPlaybackState(keepProgramme: Bool = false) {
         pendingSeekTime = nil
+        isPerformingTemporarySeekMute = false
+        isLoading = false
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        currentArtwork = nil
+        currentLoadingArtworkURL = nil
+        currentTracks = []
+        activeTrack = nil
+        currentStreamURL = nil
+        if !keepProgramme {
+            currentProgramme = nil
+        }
+        trackUpdateTask?.cancel()
+        trackUpdateTask = nil
+
         switch outputTarget {
         case .thisMac:
             player?.pause()
@@ -744,24 +789,24 @@ class PlayerService: ObservableObject {
                 try? await self?.sonosController?.stop()
             }
         }
-        isPlaying = false
-        currentArtwork = nil
-        currentTracks = []
-        activeTrack = nil
-        currentStreamURL = nil
-        currentProgramme = nil
-        trackUpdateTask?.cancel()
-        trackUpdateTask = nil
+
         localProxyServer?.stop()
         localProxyServer = nil
         sonosVolumeTask?.cancel()
         sonosVolumeTask = nil
         pendingSonosVolume = nil
 
-        MPNowPlayingInfoCenter.default().playbackState = .stopped
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         durationObserver = nil
         statusObserver = nil
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+
+    func stop() {
+        saveSession()
+        resetPlaybackState(keepProgramme: false)
     }
 
     func setVolume(_ v: Float) {
@@ -918,12 +963,8 @@ class PlayerService: ObservableObject {
         }
     }
 
-    @objc private func didFinish() {
-        isPlaying = false
-        currentProgramme = nil
-        currentStreamURL = nil
-        MPNowPlayingInfoCenter.default().playbackState = .stopped
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    @objc func didFinish() {
+        resetPlaybackState(keepProgramme: false)
     }
     
     private func updateDuration(item: AVPlayerItem) {
