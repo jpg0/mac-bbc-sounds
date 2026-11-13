@@ -550,4 +550,66 @@ final class SystemAudioServiceTests: XCTestCase {
         XCTAssertEqual(mock.currentVolume, 45, "Changing track while already playing must preserve lifted volume")
         XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
     }
+
+    @MainActor
+    func testResumingPausedPlaybackOnSonosLimitsInitialVolumeTo25Percent() async throws {
+        let mock = MockSonosDevice(roomName: "Lounge", currentVolume: 100)
+        let port = try mock.start()
+        defer { mock.stop() }
+
+        let mockSystemAudio = MockSystemAudioService()
+        let player = PlayerService(systemAudioService: mockSystemAudio)
+
+        let streamURL = URL(string: "https://open.live.bbc.co.uk/radio4.m3u8")!
+        let prog = Programme(
+            id: "m004paused",
+            index: 0,
+            name: "Woman's Hour",
+            channel: "BBC Radio 4",
+            duration: nil,
+            description: "Daily magazine",
+            firstBroadcast: nil,
+            artworkURL: nil,
+            isLive: true
+        )
+
+        // Start on Mac then pause
+        player.play(url: streamURL, programme: prog)
+        player.pause()
+        XCTAssertFalse(player.isPlaying)
+
+        let device = SonosDevice(
+            id: "RINCON_LOUNGE_RESUME_VOL",
+            name: "Lounge",
+            ipAddress: "127.0.0.1",
+            port: port,
+            isCoordinator: true
+        )
+
+        // Connect to Sonos while paused -> speaker is at 100%
+        try await player.setOutputTarget(.sonos(device))
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        // Click Play (resume) while connected to Sonos -> must limit to 25%
+        player.resume()
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be capped to 25% when resuming for the first time on this connection")
+        XCTAssertEqual(player.volume, 0.25, accuracy: 0.01)
+        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25)
+
+        // Lift volume once playing to 45%, pause, and resume -> must preserve 45%
+        player.setVolume(0.45)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(mock.currentVolume, 45)
+
+        player.pause()
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        player.resume()
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        XCTAssertEqual(mock.currentVolume, 45, "Resuming after already playing on Sonos must preserve user-adjusted volume")
+        XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
+    }
 }

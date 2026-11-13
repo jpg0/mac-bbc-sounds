@@ -63,6 +63,7 @@ class PlayerService: ObservableObject {
     private var pendingSonosVolume: Int?
     var pendingSeekTime: Double? = nil
     private var isPerformingTemporarySeekMute = false
+    private var hasSentAudioToCurrentSonosConnection = false
 
     init(
         discoveryService: SonosDiscoveryService? = nil,
@@ -168,7 +169,7 @@ class PlayerService: ObservableObject {
 
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if !wasPlayingOnThisDevice {
+                if !wasPlayingOnThisDevice || !self.hasSentAudioToCurrentSonosConnection {
                     await self.limitInitialSonosVolume(controller: controller)
                 }
                 self.observeSonosController(controller)
@@ -468,6 +469,7 @@ class PlayerService: ObservableObject {
 
     private func teardownSonosController() async {
         isPerformingTemporarySeekMute = false
+        hasSentAudioToCurrentSonosConnection = false
         sonosController?.stopPolling()
         let prevController = sonosController
         sonosController = nil
@@ -595,6 +597,7 @@ class PlayerService: ObservableObject {
     }
 
     private func limitInitialSonosVolume(controller: SonosController) async {
+        hasSentAudioToCurrentSonosConnection = true
         let initialVol = try? await controller.getVolume()
         if let vol = initialVol, vol <= 25 {
             let normalized = Float(vol) / 100.0
@@ -700,7 +703,11 @@ class PlayerService: ObservableObject {
             }
         case .sonos:
             guard let controller = sonosController else { return }
-            Task {
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if !self.hasSentAudioToCurrentSonosConnection {
+                    await self.limitInitialSonosVolume(controller: controller)
+                }
                 if controller.isMuted {
                     try? await controller.setMute(false)
                 }
