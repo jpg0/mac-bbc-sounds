@@ -64,6 +64,8 @@ class PlayerService: ObservableObject {
     var pendingSeekTime: Double? = nil
     private var isPerformingTemporarySeekMute = false
     private var hasSentAudioToCurrentSonosConnection = false
+    private var lastPlayingSonosVolume: Int? = nil
+    private var isLimitingInitialSonosVolume = false
 
     init(
         discoveryService: SonosDiscoveryService? = nil,
@@ -82,7 +84,7 @@ class PlayerService: ObservableObject {
     private func setupSystemAudioObservation() {
         systemAudioService.onVolumeChanged = { [weak self] newVolume in
             Task { @MainActor [weak self] in
-                guard let self = self, self.outputTarget.isSonos else { return }
+                guard let self = self, self.outputTarget.isSonos, !self.isLimitingInitialSonosVolume else { return }
                 self.setVolume(newVolume)
             }
         }
@@ -163,13 +165,16 @@ class PlayerService: ObservableObject {
             setupLocalPlayer(url: url, programme: programme, seekTo: seekTo, autoPlay: true)
 
         case .sonos(let device):
-            let wasPlayingOnThisDevice = (self.isPlaying && self.outputTarget.isSonos && self.sonosController?.device.id == device.id)
+            let wasPlayingOnThisDevice = (self.isPlaying && self.outputTarget.isSonos && self.sonosController?.device.id == device.id && self.hasSentAudioToCurrentSonosConnection)
+            let priorPlayingVolume = self.lastPlayingSonosVolume
             let controller = sonosController ?? makeSonosController(for: device)
             self.sonosController = controller
 
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if !wasPlayingOnThisDevice || !self.hasSentAudioToCurrentSonosConnection {
+                if !wasPlayingOnThisDevice {
+                    await self.limitInitialSonosVolume(controller: controller)
+                } else if let lastPlaying = priorPlayingVolume, controller.volume > max(25, lastPlaying) {
                     await self.limitInitialSonosVolume(controller: controller)
                 }
                 self.observeSonosController(controller)
@@ -393,23 +398,27 @@ class PlayerService: ObservableObject {
         do {
             try await controller.setAVTransportURI(url: deliveryURL, programme: programme)
 
-            // Temporarily mute if we need to seek so that Sonos doesn't burst audio from 0:00 while seeking
-            if needsSeek && !wasMuted {
-                isPerformingTemporarySeekMute = true
-                didTemporaryMute = true
-                try? await controller.setMute(true)
-            }
+            if autoPlay || needsSeek {
+                // Temporarily mute if we need to seek so that Sonos doesn't burst audio from 0:00 while seeking
+                if needsSeek && !wasMuted {
+                    isPerformingTemporarySeekMute = true
+                    didTemporaryMute = true
+                    try? await controller.setMute(true)
+                }
 
-            // Sonos AVTransport requires playback to start before seeking to a REL_TIME offset.
-            try await controller.play()
-            self.isPlaying = true
+                // Sonos AVTransport requires playback to start before seeking to a REL_TIME offset.
+                try await controller.play()
+                self.isPlaying = true
 
-            if let targetSeek = seekTo, targetSeek > 0, !programme.isLive {
-                await performSonosSeekWithRetry(controller: controller, to: targetSeek)
-            }
+                if let targetSeek = seekTo, targetSeek > 0, !programme.isLive {
+                    await performSonosSeekWithRetry(controller: controller, to: targetSeek)
+                }
 
-            if !autoPlay {
-                try await controller.pause()
+                if !autoPlay {
+                    try await controller.pause()
+                    self.isPlaying = false
+                }
+            } else {
                 self.isPlaying = false
             }
 
@@ -470,6 +479,8 @@ class PlayerService: ObservableObject {
     private func teardownSonosController() async {
         isPerformingTemporarySeekMute = false
         hasSentAudioToCurrentSonosConnection = false
+        lastPlayingSonosVolume = nil
+        isLimitingInitialSonosVolume = false
         sonosController?.stopPolling()
         let prevController = sonosController
         sonosController = nil
@@ -597,14 +608,54 @@ class PlayerService: ObservableObject {
     }
 
     private func limitInitialSonosVolume(controller: SonosController) async {
+        isLimitingInitialSonosVolume = true
+        defer { isLimitingInitialSonosVolume = false }
+
+        sonosVolumeTask?.cancel()
+        sonosVolumeTask = nil
+        pendingSonosVolume = nil
         hasSentAudioToCurrentSonosConnection = true
+
         let initialVol = try? await controller.getVolume()
         if let vol = initialVol, vol <= 25 {
+            lastPlayingSonosVolume = vol
             let normalized = Float(vol) / 100.0
             self.volume = normalized
             self.systemAudioService.setVolume(normalized, silently: true)
         } else {
             try? await controller.setVolume(25)
+            lastPlayingSonosVolume = 25
+            self.volume = 0.25
+            self.systemAudioService.setVolume(0.25, silently: true)
+        }
+    }
+
+    private func limitSonosVolumeBeforeResume(
+        controller: SonosController,
+        hadSentAudio: Bool,
+        priorPlayingVolume: Int?
+    ) async {
+        guard hadSentAudio, let priorPlayingVolume = priorPlayingVolume else {
+            await limitInitialSonosVolume(controller: controller)
+            return
+        }
+
+        isLimitingInitialSonosVolume = true
+        defer { isLimitingInitialSonosVolume = false }
+
+        sonosVolumeTask?.cancel()
+        sonosVolumeTask = nil
+        pendingSonosVolume = nil
+
+        let currentVol = try? await controller.getVolume()
+        if let vol = currentVol, vol <= max(25, priorPlayingVolume) {
+            lastPlayingSonosVolume = vol
+            let normalized = Float(vol) / 100.0
+            self.volume = normalized
+            self.systemAudioService.setVolume(normalized, silently: true)
+        } else {
+            try? await controller.setVolume(25)
+            lastPlayingSonosVolume = 25
             self.volume = 0.25
             self.systemAudioService.setVolume(0.25, silently: true)
         }
@@ -660,12 +711,19 @@ class PlayerService: ObservableObject {
 
         controller.$volume
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] vol in
-                guard let self = self, self.outputTarget.isSonos else { return }
+            .sink { [weak self, weak controller] vol in
+                guard let self = self,
+                      let controller = controller,
+                      self.outputTarget.isSonos,
+                      !self.isLimitingInitialSonosVolume,
+                      vol == controller.volume else { return }
                 let normalized = Float(vol) / 100.0
                 if abs(self.volume - normalized) > 0.01 {
                     self.volume = normalized
                     self.systemAudioService.setVolume(normalized, silently: true)
+                }
+                if self.isPlaying && self.hasSentAudioToCurrentSonosConnection {
+                    self.lastPlayingSonosVolume = vol
                 }
             }
             .store(in: &sonosCancellables)
@@ -703,11 +761,15 @@ class PlayerService: ObservableObject {
             }
         case .sonos:
             guard let controller = sonosController else { return }
+            let hadSentAudio = self.hasSentAudioToCurrentSonosConnection
+            let priorPlayingVolume = self.lastPlayingSonosVolume
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
-                if !self.hasSentAudioToCurrentSonosConnection {
-                    await self.limitInitialSonosVolume(controller: controller)
-                }
+                await self.limitSonosVolumeBeforeResume(
+                    controller: controller,
+                    hadSentAudio: hadSentAudio,
+                    priorPlayingVolume: priorPlayingVolume
+                )
                 if controller.isMuted {
                     try? await controller.setMute(false)
                 }
@@ -771,6 +833,9 @@ class PlayerService: ObservableObject {
     func resetPlaybackState(keepProgramme: Bool = false) {
         pendingSeekTime = nil
         isPerformingTemporarySeekMute = false
+        hasSentAudioToCurrentSonosConnection = false
+        lastPlayingSonosVolume = nil
+        isLimitingInitialSonosVolume = false
         isLoading = false
         isPlaying = false
         currentTime = 0
@@ -824,6 +889,9 @@ class PlayerService: ObservableObject {
             player?.volume = clamped
         case .sonos:
             let sonosVol = Int(round(clamped * 100))
+            if isPlaying && hasSentAudioToCurrentSonosConnection {
+                lastPlayingSonosVolume = sonosVol
+            }
             systemAudioService.setVolume(clamped, silently: true)
             dispatchSonosVolume(sonosVol)
         }

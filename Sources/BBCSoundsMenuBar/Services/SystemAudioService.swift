@@ -46,6 +46,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
 
     private var activeDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var isMonitoring: Bool = false
+    private var isWritingProgrammaticVolume: Bool = false
     private var targetProgrammaticVolume: Float?
     private var targetProgrammaticMute: Bool?
     private var volumeTargetGeneration: UInt64 = 0
@@ -78,6 +79,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         lock.withLock {
             guard isMonitoring else { return }
             isMonitoring = false
+            isWritingProgrammaticVolume = false
             targetProgrammaticVolume = nil
             targetProgrammaticMute = nil
         }
@@ -116,6 +118,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         guard let deviceID = defaultOutputDeviceID() else { return }
         lock.withLock {
             self.activeDeviceID = deviceID
+            self.isWritingProgrammaticVolume = false
             self.targetProgrammaticVolume = nil
             self.targetProgrammaticMute = nil
             if let vol = readVolume(for: deviceID) {
@@ -226,9 +229,11 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
             if silently {
                 self.volumeTargetGeneration &+= 1
                 generation = self.volumeTargetGeneration
+                self.isWritingProgrammaticVolume = true
                 self.targetProgrammaticVolume = clamped
                 self.lastKnownVolume = clamped
             } else {
+                self.isWritingProgrammaticVolume = false
                 self.targetProgrammaticVolume = nil
             }
             return activeDeviceID != kAudioObjectUnknown ? activeDeviceID : (defaultOutputDeviceID() ?? AudioObjectID(kAudioObjectUnknown))
@@ -238,6 +243,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
             if silently {
                 lock.withLock {
                     if self.volumeTargetGeneration == generation {
+                        self.isWritingProgrammaticVolume = false
                         self.targetProgrammaticVolume = nil
                     }
                 }
@@ -258,12 +264,23 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
             &vol
         )
 
-        if status != noErr && silently {
+        let actualVol = (status == noErr) ? (readVolume(for: devID) ?? clamped) : clamped
+
+        if silently {
             lock.withLock {
                 if self.volumeTargetGeneration == generation {
-                    self.targetProgrammaticVolume = nil
+                    self.isWritingProgrammaticVolume = false
+                    if status == noErr {
+                        self.targetProgrammaticVolume = actualVol
+                        self.lastKnownVolume = actualVol
+                    } else {
+                        self.targetProgrammaticVolume = nil
+                    }
                 }
             }
+        }
+
+        if status != noErr {
             return
         }
 
@@ -417,7 +434,7 @@ public final class SystemAudioService: @unchecked Sendable, SystemAudioServicePr
         guard let newVol = readVolume(for: deviceID) else { return }
 
         let shouldNotify: Bool = lock.withLock {
-            guard isMonitoring, activeDeviceID == deviceID else { return false }
+            guard isMonitoring, activeDeviceID == deviceID, !isWritingProgrammaticVolume else { return false }
 
             if let target = targetProgrammaticVolume {
                 if abs(newVol - target) < 0.015 {
