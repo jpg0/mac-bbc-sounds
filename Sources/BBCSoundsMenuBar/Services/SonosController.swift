@@ -371,10 +371,10 @@ public final class SonosController: ObservableObject {
 
     /// Polls volume, transport info, and position info from the speaker once, ignoring individual transient errors.
     public func pollState() async {
-        if let vol = try? await getVolume() {
+        if let vol = try? await getVolume(), self.volume != vol {
             self.volume = vol
         }
-        if let muted = try? await getMute() {
+        if let muted = try? await getMute(), self.isMuted != muted {
             self.isMuted = muted
         }
         if let tInfo = try? await getTransportInfo() {

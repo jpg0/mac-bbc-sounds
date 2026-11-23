@@ -150,10 +150,10 @@ final class SystemAudioServiceTests: XCTestCase {
         XCTAssertFalse(controller.isMuted)
     }
 
-    // MARK: - System Volume Integration with PlayerService
+    // MARK: - System Volume Isolation with PlayerService
 
     @MainActor
-    func testAdjustingMacBookVolumeAppliesToActiveSonosSpeaker() async throws {
+    func testAdjustingMacBookVolumeDoesNotChangeSonosOrPlayerVolume() async throws {
         let mock = MockSonosDevice(roomName: "Kitchen", currentVolume: 20)
         let port = try mock.start()
         defer { mock.stop() }
@@ -175,21 +175,28 @@ final class SystemAudioServiceTests: XCTestCase {
         player.outputTarget = .sonos(device)
         try await Task.sleep(nanoseconds: 100_000_000)
 
-        // Verify initial volume synced to system audio
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.20)
-        XCTAssertEqual(mockSystemAudio.lastSetVolumeSilently, true)
+        // System audio must not be modified or monitored
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
+        XCTAssertFalse(mockSystemAudio.isMonitoring)
 
         // User adjusts volume on MacBook (e.g. presses F12 to increase volume to 45%)
         mockSystemAudio.simulateUserVolumeChange(0.45)
         try await Task.sleep(nanoseconds: 150_000_000)
 
-        // Verify Sonos device received the updated volume
+        // Sonos device and player volume must remain untouched
+        XCTAssertEqual(mock.currentVolume, 20)
+        XCTAssertEqual(player.volume, 0.20, accuracy: 0.01)
+
+        // Manual in-app volume change must apply to Sonos without touching Mac system volume
+        player.setVolume(0.45)
+        try await Task.sleep(nanoseconds: 150_000_000)
         XCTAssertEqual(mock.currentVolume, 45)
-        XCTAssertEqual(player.volume, 0.45)
+        XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 
     @MainActor
-    func testAdjustingMacBookMuteAppliesToActiveSonosSpeaker() async throws {
+    func testAdjustingMacBookMuteDoesNotAffectActiveSonosSpeaker() async throws {
         let mock = MockSonosDevice(roomName: "Kitchen", isMuted: false)
         let port = try mock.start()
         defer { mock.stop() }
@@ -215,17 +222,12 @@ final class SystemAudioServiceTests: XCTestCase {
         mockSystemAudio.simulateUserMuteChange(true)
         try await Task.sleep(nanoseconds: 150_000_000)
 
-        XCTAssertTrue(mock.isMuted)
-
-        // User unmutes on MacBook
-        mockSystemAudio.simulateUserMuteChange(false)
-        try await Task.sleep(nanoseconds: 150_000_000)
-
         XCTAssertFalse(mock.isMuted)
+        XCTAssertEqual(mockSystemAudio.setMuteCallCount, 0)
     }
 
     @MainActor
-    func testRapidMacBookVolumeAdjustmentsCoalesceToFinalTarget() async throws {
+    func testRapidInAppVolumeAdjustmentsCoalesceToFinalTarget() async throws {
         let mock = MockSonosDevice(roomName: "Office", currentVolume: 10)
         let port = try mock.start()
         defer { mock.stop() }
@@ -245,12 +247,12 @@ final class SystemAudioServiceTests: XCTestCase {
         player.outputTarget = .sonos(device)
         try await Task.sleep(nanoseconds: 100_000_000)
 
-        // Simulate user holding down volume up key rapidly
-        mockSystemAudio.simulateUserVolumeChange(0.15)
-        mockSystemAudio.simulateUserVolumeChange(0.20)
-        mockSystemAudio.simulateUserVolumeChange(0.25)
-        mockSystemAudio.simulateUserVolumeChange(0.30)
-        mockSystemAudio.simulateUserVolumeChange(0.35)
+        // Simulate rapid in-app slider adjustments
+        player.setVolume(0.15)
+        player.setVolume(0.20)
+        player.setVolume(0.25)
+        player.setVolume(0.30)
+        player.setVolume(0.35)
 
         // Allow in-flight and pending coalesced tasks to complete
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -258,6 +260,7 @@ final class SystemAudioServiceTests: XCTestCase {
         // Final volume on mock device must match the latest user input
         XCTAssertEqual(mock.currentVolume, 35)
         XCTAssertEqual(player.volume, 0.35)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 
     @MainActor
@@ -313,7 +316,7 @@ final class SystemAudioServiceTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
 
         XCTAssertFalse(mock.isMuted, "Starting playback should automatically unmute a previously muted Sonos speaker")
-        XCTAssertFalse(mockSystemAudio.isMuted, "Mac system audio should also be unmuted when playback starts")
+        XCTAssertEqual(mockSystemAudio.setMuteCallCount, 0, "Mac system audio must not be modified")
     }
 
     @MainActor
@@ -395,14 +398,15 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be capped to 25% when sending audio")
         XCTAssertEqual(player.volume, 0.25, accuracy: 0.01, "Player volume must be updated to 25%")
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25, "Mac system audio must also be changed to 25%")
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0, "Mac system audio must not be modified")
 
-        // Once playing, lifting above 25% is fine
-        mockSystemAudio.simulateUserVolumeChange(0.45)
+        // Once playing, lifting above 25% in the app is fine
+        player.setVolume(0.45)
         try await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertEqual(mock.currentVolume, 45, "Lifting volume above 25% once playing must be allowed")
         XCTAssertEqual(player.volume, 0.45, accuracy: 0.01)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 
     @MainActor
@@ -445,7 +449,7 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be limited to 25% on handoff")
         XCTAssertEqual(player.volume, 0.25, accuracy: 0.01, "Player volume must be 25%")
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25, "Mac system audio must be changed to 25%")
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0, "Mac system audio must not be modified")
     }
 
     @MainActor
@@ -485,7 +489,7 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 15, "Sonos speaker volume below 25% must be preserved")
         XCTAssertEqual(player.volume, 0.15, accuracy: 0.01)
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.15)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 
     @MainActor
@@ -596,7 +600,7 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 25, "Sonos speaker must be capped to 25% when resuming for the first time on this connection")
         XCTAssertEqual(player.volume, 0.25, accuracy: 0.01)
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
 
         // Lift volume once playing to 45%, pause, and resume -> must preserve 45%
         player.setVolume(0.45)
@@ -656,9 +660,8 @@ final class SystemAudioServiceTests: XCTestCase {
         player.pause()
         try await Task.sleep(nanoseconds: 150_000_000)
 
-        // Simulate volume being raised to 100% while paused
-        mockSystemAudio.simulateUserVolumeChange(1.0)
-        try await Task.sleep(nanoseconds: 150_000_000)
+        // Simulate volume being raised to 100% externally while paused
+        mock.currentVolume = 100
         XCTAssertEqual(mock.currentVolume, 100)
 
         player.resume()
@@ -666,7 +669,7 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 25, "Resuming after volume spiked to 100% while paused must cap to 25%")
         XCTAssertEqual(player.volume, 0.25, accuracy: 0.01)
-        XCTAssertEqual(mockSystemAudio.lastSetVolume, 0.25)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 
     @MainActor
@@ -759,8 +762,7 @@ final class SystemAudioServiceTests: XCTestCase {
         try await Task.sleep(nanoseconds: 150_000_000)
 
         // Raise Sonos volume externally/while stopped to 100%
-        mockSystemAudio.simulateUserVolumeChange(1.0)
-        try await Task.sleep(nanoseconds: 150_000_000)
+        mock.currentVolume = 100
         XCTAssertEqual(mock.currentVolume, 100)
 
         player.play(url: streamURL, programme: prog)
@@ -768,5 +770,6 @@ final class SystemAudioServiceTests: XCTestCase {
 
         XCTAssertEqual(mock.currentVolume, 25, "Playing after stop when Sonos volume was raised must cap to 25%")
         XCTAssertEqual(player.volume, 0.25, accuracy: 0.01)
+        XCTAssertEqual(mockSystemAudio.setVolumeCallCount, 0)
     }
 }
